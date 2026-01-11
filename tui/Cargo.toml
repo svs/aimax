@@ -1,0 +1,14 @@
+[package]
+name = "aimax"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "aimax"
+path = "src/main.rs"
+
+[dependencies]
+aimax_core = { path = "../core" }
+ratatui = "0.26"
+crossterm = "0.27"
+steel-core = "0.7"

@@ -1,0 +1,30 @@
+[package]
+name = "aimax_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# Rope data structure for efficient text editing
+ropey = "1.6"
+
+# Tree-sitter for parsing, syntax highlighting, structural editing
+tree-sitter = "0.24"
+tree-sitter-highlight = "0.24"
+
+# Language grammars (add as needed)
+tree-sitter-rust = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-json = "0.24"
+
+# Fuzzy matching (used by Helix)
+nucleo = "0.5"
+nucleo-matcher = "0.3"
+
+# Path utilities
+dirs = "5"
+
+# Steel Scheme for scripting
+steel-core = "0.7"
