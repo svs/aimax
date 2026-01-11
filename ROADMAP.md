@@ -2,33 +2,42 @@
 
 ## 1. Core Architecture (Rust)
 
-- [ ] **Multi-Buffer Support**
-    - Refactor `Editor` to hold `buffers: HashMap<String, Buffer>`.
-    - Implement `current_buffer` pointer.
-    - Commands: `switch-to-buffer`, `kill-buffer`.
+- [x] **Multi-Buffer Support**
+    - Refactor `Editor` to hold `buffers: Vec<Buffer>`.
+    - Implement `current` buffer index.
+    - Commands: `switch-to-buffer` (C-x b), `find-file` (C-x C-f).
 
 - [ ] **Window Management (Splits)**
     - Create `Window` struct (view into a buffer + scroll/cursor state).
     - Create `Layout` tree (Horizontal/Vertical splits).
     - Commands: `split-window-below`, `split-window-right`, `delete-other-windows`.
 
-- [ ] **IPC Server (The AI Interface)**
-    - **Crucial:** Background thread listening on Unix Socket (`/tmp/aimax.sock`).
+- [x] **IPC Server (The AI Interface)**
+    - Background thread listening on Unix Socket (`~/.aimax/aimax.sock`).
     - Protocol: Text in (Scheme code) -> Text out (Evaluation result).
     - Thread-safety: Command Queue pattern to execute Scheme on the main thread.
+    - Multi-line S-expression support.
 
 - [ ] **Undo/Redo**
     - Implement operation history stack per buffer.
 
+- [x] **Face System (Theming)**
+    - FaceRegistry with named faces (font-lock-keyword-face, etc.).
+    - ScopeMap: tree-sitter scopes → face names.
+    - Cached color lookups (O(1) via index).
+    - Scheme API: `(set-face-attribute face key value)`.
+
 ## 2. Scripting API (Scheme)
 
-- [ ] **Buffer Manipulation**
-    - Expose `(buffer-insert text)`, `(buffer-text)`, `(buffer-point)`.
-    - Expose `(make-buffer name)`, `(set-current-buffer name)`.
+- [x] **Buffer Manipulation**
+    - `(buffer-insert text)`, `(buffer-text)`, `(buffer-line n)`.
+    - `(buffer-open path)`, `(buffer-switch name)`.
+    - Movement: `(forward-char)`, `(next-line)`, `(goto-line n)`, etc.
 
-- [ ] **Hooks System**
-    - `(run-hooks 'hook-name)` implementation.
-    - Triggers in Rust: `after-save`, `before-save`, `find-file`.
+- [x] **Hooks System**
+    - Variables holding lambdas: `*before-quit*`, `*before-save*`, `*after-save*`.
+    - User overrides via `set!` in init.scm.
+    - Desktop save/restore on quit/startup.
 
 - [ ] **Keymap Config**
     - Move `C-x C-f` definitions from Rust `CommandRegistry` to `init.scm`.
