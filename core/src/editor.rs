@@ -8,6 +8,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::mpsc::{self, Receiver, Sender};
 use crate::{Buffer, Interpreter, command::CommandResult, scheme::Action};
+use crate::process::{ProcessRegistry, ProcessMessage, MAX_PROCESS_BUFFER_LINES};
 
 /// Log errors to /tmp/aimax.log
 fn log_error(context: &str, error: &str) {
@@ -44,6 +45,10 @@ pub struct Editor {
 
     // Face changes for TUI to apply to SyntaxHighlighter
     pub face_actions: Vec<(String, String, String)>,  // (face, key, value)
+
+    // Process system
+    pub processes: ProcessRegistry,
+    process_rx: Receiver<ProcessMessage>,
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -58,6 +63,7 @@ impl Editor {
     pub fn new(cwd: PathBuf) -> Self {
         let scheme = Interpreter::with_core();
         let (ipc_tx, ipc_rx) = mpsc::channel();
+        let (process_tx, process_rx) = mpsc::channel();
         let mut editor = Editor {
             buffers: vec![Buffer::new("*scratch*")],
             current: 0,
@@ -74,6 +80,8 @@ impl Editor {
             status_message: None,
             should_quit: false,
             face_actions: vec![],
+            processes: ProcessRegistry::new(process_tx),
+            process_rx,
         };
 
         // Load user init file
@@ -125,6 +133,8 @@ impl Editor {
                 .filter_map(|b| b.file_path.as_ref())
                 .map(|p| p.to_string_lossy().to_string())
                 .collect();
+            // Sync running process names
+            state.process_names = self.processes.list();
         }
         // Note: We skip syncing Scheme globals here for performance.
         // Scheme code should use primitives like (buffer-point) instead of *buffer-point*.
@@ -221,6 +231,29 @@ impl Editor {
                 Action::Newline => self.buffer().insert_char('\n'),
                 Action::SetFaceAttribute { face, key, value } => {
                     self.face_actions.push((face, key, value));
+                }
+                Action::StartProcess { name, command, args } => {
+                    match self.processes.spawn(&name, &command, &args) {
+                        Ok(_) => {
+                            // Create or switch to process buffer
+                            if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+                                self.current = idx;
+                            } else {
+                                let buf = Buffer::new(&name);
+                                self.buffers.push(buf);
+                                self.current = self.buffers.len() - 1;
+                            }
+                            self.status_message = Some(format!("Started {}", name));
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Failed to start process: {}", e));
+                        }
+                    }
+                }
+                Action::ProcessSendString { name, text } => {
+                    if let Err(e) = self.processes.send(&name, &text) {
+                        self.status_message = Some(format!("Failed to send: {}", e));
+                    }
                 }
             }
         }
@@ -460,6 +493,54 @@ impl Editor {
             // Otherwise run as scheme
             let _ = self.run_scheme("ipc", &code);
         }
+        processed
+    }
+
+    /// Process messages from running processes (PTY output)
+    /// Returns true if any messages were processed
+    pub fn process_messages(&mut self) -> bool {
+        let mut processed = false;
+
+        while let Ok(msg) = self.process_rx.try_recv() {
+            processed = true;
+            match msg {
+                ProcessMessage::Output { name, text } => {
+                    // Find or create process buffer
+                    let buf_idx = self.buffers.iter()
+                        .position(|b| b.name == name)
+                        .unwrap_or_else(|| {
+                            let buf = Buffer::new(&name);
+                            self.buffers.push(buf);
+                            self.buffers.len() - 1
+                        });
+
+                    // Append output to buffer
+                    let buf = &mut self.buffers[buf_idx];
+                    buf.append(&text);
+
+                    // Ring buffer: trim if too many lines
+                    let line_count = buf.line_count();
+                    if line_count > MAX_PROCESS_BUFFER_LINES {
+                        let lines_to_remove = line_count - MAX_PROCESS_BUFFER_LINES;
+                        buf.delete_lines(0, lines_to_remove);
+                    }
+                }
+                ProcessMessage::Exited { name, exit_code } => {
+                    // Find process buffer and append exit message
+                    if let Some(buf_idx) = self.buffers.iter().position(|b| b.name == name) {
+                        let msg = match exit_code {
+                            Some(code) => format!("\n\nProcess {} exited with code {}\n", name, code),
+                            None => format!("\n\nProcess {} exited\n", name),
+                        };
+                        self.buffers[buf_idx].append(&msg);
+                    }
+                    // Remove from registry
+                    self.processes.remove(&name);
+                    self.status_message = Some(format!("Process {} exited", name));
+                }
+            }
+        }
+
         processed
     }
 

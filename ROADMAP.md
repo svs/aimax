@@ -42,16 +42,21 @@
 - [ ] **Keymap Config**
     - Move `C-x C-f` definitions from Rust `CommandRegistry` to `init.scm`.
 
-## 4. Process System (The AI "Eyes")
+## 4. Process System (The AI "Eyes" & Integration)
 
-- [ ] **Process Buffers (Comint-style)**
-    - Use `portable-pty` to spawn processes.
+- [x] **Process Buffers (Comint-style)**
+    - Use `portable-pty` to spawn external CLIs (`claude`, `opencode`, `bash`).
     - Stream PTY output into a `Buffer`.
-    - Implement Ring Buffer logic (drop old lines to prevent OOM).
-    - Handle ANSI escape codes (convert to Faces or strip).
+    - Implement Ring Buffer logic.
+    - Scheme API: `(start-process name command args)`, `(process-send-string name text)`, `(process-running? name)`.
+
+- [ ] **Context Injection (The Bridge)**
+    - Scheme functions to grab editor state (buffer content, selection, errors).
+    - `(process-send-string)` to pipe this context into the running CLI.
+    - Specialized modes (`claude-mode`) that define how to format context for specific tools.
 
 - [ ] **Process Hooks**
-    - `(add-hook 'process-output-hook ...)` so agents can react to output in real-time.
+    - `(add-hook 'process-output-hook ...)` for observing output.
 
 ## 3. "Agent Ready" Features
 

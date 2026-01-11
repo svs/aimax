@@ -346,6 +346,58 @@ impl Buffer {
     pub fn lines(&self) -> impl Iterator<Item = String> + '_ {
         self.rope.lines().map(|l| l.to_string())
     }
+
+    /// Append text at the end of buffer (for process output)
+    /// Moves point to the end
+    pub fn append(&mut self, s: &str) {
+        let end = self.rope.len_chars();
+        self.rope.insert(end, s);
+        self.point = self.rope.len_chars();
+        self.modified = true;
+    }
+
+    /// Replace entire buffer content (for syncing from TUI)
+    pub fn set_text(&mut self, text: &str) {
+        self.rope = Rope::from_str(text);
+        self.point = self.point.min(self.rope.len_chars());
+        self.modified = true;
+    }
+
+    /// Set cursor position by row/col (for syncing from TUI)
+    pub fn set_cursor(&mut self, row: usize, col: usize) {
+        if row < self.rope.len_lines() {
+            let line_start = self.rope.line_to_char(row);
+            let line_len = self.rope.line(row).len_chars();
+            self.point = line_start + col.min(line_len);
+        }
+    }
+
+    /// Delete lines from start_line (0-indexed) for count lines
+    /// Used for ring buffer behavior in process buffers
+    pub fn delete_lines(&mut self, start_line: usize, count: usize) {
+        if start_line >= self.rope.len_lines() || count == 0 {
+            return;
+        }
+
+        let end_line = (start_line + count).min(self.rope.len_lines());
+        let start_char = self.rope.line_to_char(start_line);
+        let end_char = if end_line >= self.rope.len_lines() {
+            self.rope.len_chars()
+        } else {
+            self.rope.line_to_char(end_line)
+        };
+
+        if start_char < end_char {
+            self.rope.remove(start_char..end_char);
+            // Adjust point if it was in or after deleted region
+            if self.point >= end_char {
+                self.point -= end_char - start_char;
+            } else if self.point > start_char {
+                self.point = start_char;
+            }
+            self.modified = true;
+        }
+    }
 }
 
 #[cfg(test)]

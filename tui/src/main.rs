@@ -6,19 +6,8 @@ use std::env;
 use std::io;
 use std::io::Write;
 use std::path::PathBuf;
-use std::fs::{self, OpenOptions};
-use std::time::SystemTime;
+use std::fs::OpenOptions;
 
-/// Log to /tmp/aimax.log
-fn log(msg: &str) {
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/aimax.log")
-    {
-        let _ = writeln!(file, "{}", msg);
-    }
-}
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
@@ -35,8 +24,19 @@ use ratatui::{
 
 use aimax_core::{
     Buffer, Editor, Key, KeyLookup, KeymapStack,
-    Lang, MinibufferMode, SyntaxHighlighter,
+    Lang, SyntaxHighlighter,
 };
+
+/// Log to /tmp/aimax.log
+fn log(msg: &str) {
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/aimax.log")
+    {
+        let _ = writeln!(file, "{}", msg);
+    }
+}
 
 /// TUI state wrapping the core Editor
 struct Tui {
@@ -105,35 +105,15 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-const EVAL_FILE: &str = "/tmp/aimax-eval.scm";
-const RESULT_FILE: &str = "/tmp/aimax-result.txt";
-
-fn check_eval_file(tui: &mut Tui, last_mtime: &mut Option<SystemTime>) {
-    let mtime = fs::metadata(EVAL_FILE).ok().and_then(|m| m.modified().ok());
-
-    if mtime != *last_mtime && mtime.is_some() {
-        *last_mtime = mtime;
-
-        if let Ok(code) = fs::read_to_string(EVAL_FILE) {
-            let code = code.trim();
-            if !code.is_empty() {
-                log(&format!("EVAL: {}", code));
-                let result = match tui.editor.scheme.run(code) {
-                    Ok(val) => format!("{:?}", val),
-                    Err(e) => format!("ERROR: {}", e),
-                };
-                log(&format!("RESULT: {}", result));
-                let _ = fs::write(RESULT_FILE, &result);
-                tui.editor.status_message = Some(format!("Eval: {}", &result[..result.len().min(50)]));
-            }
-        }
-    }
-}
-
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui) -> io::Result<()> {
     loop {
-        // Handle IPC commands (may set needs_redraw)
+        // Handle IPC commands
         if tui.editor.process_ipc() {
+            tui.needs_redraw = true;
+        }
+
+        // Handle process output (PTY reader threads)
+        if tui.editor.process_messages() {
             tui.needs_redraw = true;
         }
 
@@ -145,19 +125,19 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
             tui.needs_redraw = true;
         }
 
-        // Only render when needed
+        // Render
         if tui.needs_redraw {
             tui.needs_redraw = false;
 
-            // Clone state for rendering
             let lang = tui.buffer_lang();
             let text = tui.editor.buffer_ref().text();
             let buffer_name = tui.editor.buffer_ref().name.clone();
             let cursor_line = tui.editor.buffer_ref().current_line();
             let cursor_col = tui.editor.buffer_ref().current_column();
+            let modified = tui.editor.buffer_ref().is_modified();
             let status_msg = tui.editor.status_message.clone();
 
-            // Minibuffer state from Scheme
+            // Minibuffer state
             let mb_active = tui.editor.minibuffer_active;
             let mb_prompt = tui.editor.minibuffer_prompt.clone();
             let mb_input = tui.editor.minibuffer_input.clone();
@@ -167,7 +147,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
             terminal.draw(|f| {
                 let size = f.size();
 
-                // Layout: buffer area + status line + minibuffer
+                // Layout: buffer + status + minibuffer
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
@@ -177,15 +157,26 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
                     ])
                     .split(size);
 
-                // Highlight visible lines in ONE pass (not per-line!)
-                let visible_lines = chunks[0].height as usize;
-                let line_highlights = tui.syntax.highlights_for_lines(lang, &text, 1, visible_lines);
+                // Calculate scroll offset to keep cursor visible
+                let height = chunks[0].height as usize;
+                let scroll_offset = if cursor_line > height {
+                    cursor_line - height
+                } else {
+                    0
+                };
+
+                // Highlight visible lines
+                let start_line = scroll_offset + 1;
+                let end_line = scroll_offset + height;
+                let line_highlights = tui.syntax.highlights_for_lines(lang, &text, start_line, end_line);
 
                 // Render buffer with syntax highlighting
-                render_buffer(f, chunks[0], &text, &line_highlights, cursor_line, cursor_col);
+                render_buffer(f, chunks[0], &text, &line_highlights, cursor_line, cursor_col, scroll_offset);
 
                 // Status line
-                let status = format!(" {} L{}:C{} {}",
+                let mod_indicator = if modified { "[+] " } else { "" };
+                let status = format!(" {}{} L{}:C{} {}",
+                    mod_indicator,
                     buffer_name,
                     cursor_line,
                     cursor_col,
@@ -205,7 +196,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
             })?;
         }
 
-        // Handle input - poll with short timeout to stay responsive to IPC
+        // Handle input
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key_event) = event::read()? {
                 tui.needs_redraw = true;
@@ -231,35 +222,48 @@ fn render_buffer(
     highlights: &[Vec<(usize, usize, (u8, u8, u8))>],
     cursor_line: usize,
     cursor_col: usize,
+    scroll_offset: usize,
 ) {
+    let height = area.height as usize;
     let mut lines: Vec<Line> = Vec::new();
 
-    for (line_idx, line_text) in text.lines().enumerate().take(area.height as usize) {
-        let line_highlights = highlights.get(line_idx).cloned().unwrap_or_default();
+    for (idx, line_text) in text.lines().skip(scroll_offset).take(height).enumerate() {
+        let line_highlights = highlights.get(idx).cloned().unwrap_or_default();
 
         let mut spans: Vec<Span> = Vec::new();
         let mut last_end = 0;
 
         for (start, end, color) in line_highlights {
-            if start > last_end {
-                spans.push(Span::raw(&line_text[last_end..start.min(line_text.len())]));
+            // Add unstyled text before this highlight
+            if start > last_end && last_end < line_text.len() {
+                let end_idx = start.min(line_text.len());
+                if let Some(slice) = line_text.get(last_end..end_idx) {
+                    spans.push(Span::raw(slice.to_string()));
+                }
             }
+            // Add highlighted text
             if start < line_text.len() {
-                let (r, g, b) = color;
-                spans.push(Span::styled(
-                    &line_text[start..end.min(line_text.len())],
-                    Style::default().fg(Color::Rgb(r, g, b))
-                ));
+                let end_idx = end.min(line_text.len());
+                if let Some(slice) = line_text.get(start..end_idx) {
+                    let (r, g, b) = color;
+                    spans.push(Span::styled(
+                        slice.to_string(),
+                        Style::default().fg(Color::Rgb(r, g, b))
+                    ));
+                }
             }
             last_end = end;
         }
 
+        // Add remaining unstyled text
         if last_end < line_text.len() {
-            spans.push(Span::raw(&line_text[last_end..]));
+            if let Some(slice) = line_text.get(last_end..) {
+                spans.push(Span::raw(slice.to_string()));
+            }
         }
 
         if spans.is_empty() {
-            spans.push(Span::raw(line_text));
+            spans.push(Span::raw(line_text.to_string()));
         }
 
         lines.push(Line::from(spans));
@@ -268,11 +272,12 @@ fn render_buffer(
     let buffer_widget = Paragraph::new(lines);
     f.render_widget(buffer_widget, area);
 
-    // Position cursor
-    if cursor_line <= area.height as usize {
+    // Position cursor (adjusted for scroll)
+    let cursor_screen_line = cursor_line.saturating_sub(scroll_offset);
+    if cursor_screen_line > 0 && cursor_screen_line <= height {
         f.set_cursor(
-            area.x + cursor_col.saturating_sub(1) as u16,
-            area.y + cursor_line.saturating_sub(1) as u16
+            area.x + cursor_col as u16,
+            area.y + (cursor_screen_line - 1) as u16
         );
     }
 }
@@ -293,12 +298,10 @@ fn render_minibuffer(
         ])
         .split(area);
 
-    // Prompt + input
     let prompt_line = format!("{}{}", prompt, input);
     let prompt_widget = Paragraph::new(prompt_line);
     f.render_widget(prompt_widget, chunks[0]);
 
-    // Completions
     if !matches.is_empty() && chunks[1].height > 0 {
         let items: Vec<ListItem> = matches.iter()
             .enumerate()
@@ -317,7 +320,6 @@ fn render_minibuffer(
         f.render_widget(list, chunks[1]);
     }
 
-    // Cursor in minibuffer
     f.set_cursor(
         chunks[0].x + prompt.len() as u16 + input.len() as u16,
         chunks[0].y
@@ -325,41 +327,20 @@ fn render_minibuffer(
 }
 
 fn handle_minibuffer_key(tui: &mut Tui, key: &KeyEvent) {
-    log(&format!("minibuffer key: {:?}, active={}, input={:?}",
-        key.code, tui.editor.minibuffer_active, tui.editor.minibuffer_input));
-
     match key.code {
         KeyCode::Enter => {
-            log(&format!("ENTER pressed, input={:?}", tui.editor.minibuffer_input));
-            match tui.editor.minibuffer_submit() {
-                Ok(()) => {
-                    let name = tui.editor.buffer_ref().name.clone();
-                    log(&format!("submit OK, buffer={}, status={:?}", name, tui.editor.status_message));
-                }
-                Err(e) => log(&format!("submit ERROR: {}", e)),
-            }
+            let _ = tui.editor.minibuffer_submit();
         }
-        KeyCode::Esc => {
-            tui.editor.minibuffer_cancel();
-        }
-        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Esc | KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             tui.editor.minibuffer_cancel();
         }
         KeyCode::Tab => {
             tui.editor.minibuffer_complete();
-            log(&format!("TAB complete, input={:?}", tui.editor.minibuffer_input));
         }
-        // Arrow keys always work, C-n/C-p also work
-        KeyCode::Down => {
+        KeyCode::Down | KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             tui.editor.minibuffer_next();
         }
-        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            tui.editor.minibuffer_next();
-        }
-        KeyCode::Up => {
-            tui.editor.minibuffer_prev();
-        }
-        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Up | KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             tui.editor.minibuffer_prev();
         }
         KeyCode::Backspace => {
@@ -368,14 +349,12 @@ fn handle_minibuffer_key(tui: &mut Tui, key: &KeyEvent) {
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             tui.editor.minibuffer_insert(c);
         }
-        _ => {
-            log(&format!("unhandled minibuffer key: {:?}", key.code));
-        }
+        _ => {}
     }
 }
 
 fn handle_buffer_key(tui: &mut Tui, key: &KeyEvent) {
-    // Check keymap first - use process_key for key sequences like C-x C-f
+    // Check keymap first for commands like C-x C-f
     if let Some(our_key) = key_from_event(key) {
         match tui.keymaps.process_key(&our_key) {
             KeyLookup::Command(cmd) => {
@@ -383,12 +362,10 @@ fn handle_buffer_key(tui: &mut Tui, key: &KeyEvent) {
                 return;
             }
             KeyLookup::Prefix => {
-                // Show pending keys in status
                 tui.editor.status_message = Some(format!("{}-", tui.keymaps.pending_display()));
                 return;
             }
             KeyLookup::Unbound => {
-                // If we had pending keys, clear them and show error
                 if tui.keymaps.has_pending() {
                     let pending = tui.keymaps.pending_display();
                     tui.keymaps.clear_pending();
@@ -420,6 +397,19 @@ fn handle_buffer_key(tui: &mut Tui, key: &KeyEvent) {
         KeyCode::End | KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             tui.editor.buffer().end_of_line();
         }
+        // Page Up/Down
+        KeyCode::PageUp => {
+            let height = 20; // Approximate, could get from terminal size
+            for _ in 0..height {
+                tui.editor.buffer().previous_line();
+            }
+        }
+        KeyCode::PageDown => {
+            let height = 20;
+            for _ in 0..height {
+                tui.editor.buffer().next_line();
+            }
+        }
 
         // Editing
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL)
@@ -436,7 +426,7 @@ fn handle_buffer_key(tui: &mut Tui, key: &KeyEvent) {
             tui.editor.buffer().delete_forward();
         }
 
-        // Commands
+        // Keyboard quit
         KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             tui.keymaps.clear_pending();
             tui.editor.status_message = Some("Quit".to_string());
@@ -462,6 +452,8 @@ fn key_from_event(event: &KeyEvent) -> Option<Key> {
         KeyCode::Down => "down".to_string(),
         KeyCode::Home => "home".to_string(),
         KeyCode::End => "end".to_string(),
+        KeyCode::PageUp => "prior".to_string(),
+        KeyCode::PageDown => "next".to_string(),
         KeyCode::Esc => "escape".to_string(),
         _ => return None,
     };
@@ -471,14 +463,11 @@ fn key_from_event(event: &KeyEvent) -> Option<Key> {
 
 fn execute_command(tui: &mut Tui, cmd: &str) {
     use aimax_core::CommandResult;
-    log(&format!("execute_command: {}", cmd));
 
-    // TUI-specific handling for keyboard-quit (clears pending keys)
     if cmd == "keyboard-quit" {
         tui.keymaps.clear_pending();
     }
 
-    // Core handles everything else
     match tui.editor.execute_command(cmd) {
         CommandResult::Quit => tui.should_quit = true,
         _ => {}

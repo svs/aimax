@@ -45,6 +45,9 @@ pub enum Action {
     Newline,
     // Face system
     SetFaceAttribute { face: String, key: String, value: String },
+    // Process system
+    StartProcess { name: String, command: String, args: Vec<String> },
+    ProcessSendString { name: String, text: String },
 }
 
 /// Shared state for Scheme to query buffer contents
@@ -54,6 +57,7 @@ pub struct SharedState {
     pub buffer_text: String,
     pub buffer_lines: Vec<String>,
     pub buffer_file_paths: Vec<String>,  // All open buffer file paths
+    pub process_names: Vec<String>,       // Names of running processes
 }
 
 /// The Scheme interpreter
@@ -646,6 +650,43 @@ fn register_primitives(
         if let Ok(mut queue) = actions_clone.lock() {
             queue.push(Action::SetFaceAttribute { face, key, value });
         }
+    });
+
+    // ===== Process Primitives =====
+
+    // (start-process name command args...)
+    // Example: (start-process "*shell*" "/bin/bash" '())
+    let actions_clone = actions.clone();
+    engine.register_fn("start-process", move |name: String, command: String, args: Vec<String>| {
+        if let Ok(mut queue) = actions_clone.lock() {
+            queue.push(Action::StartProcess { name, command, args });
+        }
+    });
+
+    // (process-send-string name text)
+    // Example: (process-send-string "*shell*" "ls -la\n")
+    let actions_clone = actions.clone();
+    engine.register_fn("process-send-string", move |name: String, text: String| {
+        if let Ok(mut queue) = actions_clone.lock() {
+            queue.push(Action::ProcessSendString { name, text });
+        }
+    });
+
+    // (process-running? name) - check if a process is running
+    // Returns from shared state (sync'd before Scheme execution)
+    let state = shared_state.clone();
+    engine.register_fn("process-running?", move |name: String| -> bool {
+        state.read()
+            .map(|s| s.process_names.contains(&name))
+            .unwrap_or(false)
+    });
+
+    // (process-list) - get all running process names
+    let state = shared_state.clone();
+    engine.register_fn("process-list", move || -> Vec<String> {
+        state.read()
+            .map(|s| s.process_names.clone())
+            .unwrap_or_default()
     });
 }
 

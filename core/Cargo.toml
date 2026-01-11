@@ -28,3 +28,9 @@ dirs = "5"
 
 # Steel Scheme for scripting
 steel-core = "0.7"
+
+# PTY for process buffers (shells, AI agents)
+portable-pty = "0.8"
+
+# Strip ANSI escape codes from process output
+strip-ansi-escapes = "0.2"
