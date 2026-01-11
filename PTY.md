@@ -39,24 +39,21 @@ The PTY Master is a blocking reader. We cannot read it on the Main Thread.
 
 **The Loop:**
 1.  Read chunk `[u8]` from PTY Master.
-2.  Convert to String (handle UTF-8 validly, maybe use `String::from_utf8_lossy`).
-3.  **Strip ANSI Codes:** (Phase 1) Use a crate like `strip-ansi-escapes` or regex to clean the text.
-    *   *Phase 2:* Parse ANSI and emit Text Properties (Faces).
-4.  Send `Action::InsertProcessOutput(proc_name, text)` to the Editor's `ipc_tx` (or a dedicated channel).
-5.  Main Thread picks up Action, finds the associated Buffer, and appends the text.
+2.  Feed bytes into the `vt100` parser (held in the `Process` struct).
+3.  **The Abstraction:** We don't just dump text. We maintain a virtual screen state.
+    - **Crates:** Use `tui-term` for rendering and `vt100` for state.
+4.  **Notification:** Send `Action::Redraw` to the Editor. Unlike text buffers, terminal buffers are state machines, not just ropes.
 
 ## 4. The Scheme API
 
-`(start-process name command args)`
-- Spawns the process.
-- Creates/Switches to a buffer named `*name*`.
-- Returns a process handle (or name).
+`(start-term "name" "cmd" "args")`
+- Spawns a full terminal emulator buffer.
+- Uses `vt100` backend.
 
-`(process-send-string name text)`
-- Writes `text` to the PTY Master writer.
-
-`(process-running? name)`
-- Checks if it's still alive.
+`(start-process "name" "cmd" "args")`
+- Spawns a raw process (Comint-style).
+- Output is stripped of ANSI and appended to a text buffer.
+- Best for "Chat with Agent" or "Build Output".
 
 ## 5. Ring Buffer Logic (Safety)
 If `claude` dumps 10MB of text, we can't let the `Rope` grow forever.

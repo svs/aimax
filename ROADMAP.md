@@ -60,6 +60,12 @@
 
 ## 3. "Agent Ready" Features
 
+- [ ] **ACP (Agent Client Protocol) Integration**
+    - JSON-RPC 2.0 based communication with AI agents (Claude Code, Gemini CLI, etc.)
+    - Structured requests/responses instead of raw PTY output.
+    - Permission system for file operations.
+    - See `docs/ACP.md` for design.
+
 - [ ] **Semantic Editing Primitives**
     - Helper functions for agents to edit code reliably.
     - Example: `(replace-range start-line start-col end-line end-col "text")`.
