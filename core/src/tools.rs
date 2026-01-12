@@ -7,7 +7,7 @@
 //! - handler: executes the tool and returns result
 
 use crate::llm::{Tool, ToolParam};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -334,6 +334,7 @@ fn handle_search_files(input: Value) -> ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_registry_has_builtin_tools() {

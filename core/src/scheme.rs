@@ -61,6 +61,12 @@ pub enum Action {
         system: Option<String>,
         messages: Vec<(String, String)>,  // (role, content)
     },
+    // Tool execution (from agentic chat)
+    ExecuteTool {
+        id: String,      // Tool call ID (for response)
+        name: String,    // Tool name
+        input: String,   // JSON input string
+    },
     // Minibuffer - Scheme activated generic minibuffer, pushes state through
     MinibufferActivate { prompt: String },
 }
@@ -894,6 +900,14 @@ fn register_primitives(
         }
     });
 
+    // (execute-rust-tool id name input) - execute a tool from the registry
+    let actions_clone = actions.clone();
+    engine.register_fn("execute-rust-tool", move |id: String, name: String, input: String| {
+        if let Ok(mut queue) = actions_clone.lock() {
+            queue.push(Action::ExecuteTool { id, name, input });
+        }
+    });
+
     // minibuffer-activate! - tells Rust minibuffer is now active in generic mode
     let actions_clone = actions.clone();
     engine.register_fn("minibuffer-activate!", move |prompt: String| {
@@ -1215,32 +1229,33 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_use_callback() {
+    fn test_tool_result_handling() {
         let mut interp = Interpreter::with_core();
 
-        // Initially, no pending tool calls
-        let result = interp.run("(pending-tool-count)").unwrap();
-        assert_eq!(result, SteelVal::IntV(0), "Should start with no pending tools");
+        // Initially, chat history should be empty
+        let result = interp.run("(chat-message-count)").unwrap();
+        assert_eq!(result, SteelVal::IntV(0), "History should start empty");
 
-        // Simulate a tool use callback from the LLM
-        let result = interp.run(r#"(chat-on-tool-use "call_123" "read_file" "{\"path\":\"/test.txt\"}")"#);
-        assert!(result.is_ok(), "Should handle tool use callback");
+        // Simulate adding a tool result (what happens after tool execution)
+        let result = interp.run(r#"(chat-add-tool-result "call_123" "success" "File contents here")"#);
+        assert!(result.is_ok(), "Should handle tool result callback");
 
-        let result = interp.run("(pending-tool-count)").unwrap();
-        assert_eq!(result, SteelVal::IntV(1), "Should have 1 pending tool call");
+        // Should have added a tool_result message to history
+        let result = interp.run("(chat-message-count)").unwrap();
+        assert_eq!(result, SteelVal::IntV(1), "Should have 1 message after tool result");
 
-        // Add another tool call
-        let result = interp.run(r#"(chat-on-tool-use "call_456" "write_file" "{\"path\":\"/out.txt\",\"content\":\"hello\"}")"#);
-        assert!(result.is_ok(), "Should handle second tool use callback");
+        // Add an error result
+        let result = interp.run(r#"(chat-add-tool-result "call_456" "error" "File not found")"#);
+        assert!(result.is_ok(), "Should handle error tool result");
 
-        let result = interp.run("(pending-tool-count)").unwrap();
-        assert_eq!(result, SteelVal::IntV(2), "Should have 2 pending tool calls");
+        let result = interp.run("(chat-message-count)").unwrap();
+        assert_eq!(result, SteelVal::IntV(2), "Should have 2 messages");
 
-        // Clear pending tools
-        let result = interp.run("(clear-pending-tools)");
-        assert!(result.is_ok(), "Should be able to clear pending tools");
+        // Clear history
+        let result = interp.run("(chat-clear)");
+        assert!(result.is_ok(), "Should be able to clear chat");
 
-        let result = interp.run("(pending-tool-count)").unwrap();
-        assert_eq!(result, SteelVal::IntV(0), "Should have no pending tools after clear");
+        let result = interp.run("(chat-message-count)").unwrap();
+        assert_eq!(result, SteelVal::IntV(0), "History should be empty after clear");
     }
 }

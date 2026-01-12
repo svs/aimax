@@ -59,6 +59,9 @@ pub struct Editor {
     chat_rx: Receiver<StreamEvent>,
     /// Accumulates the current assistant response for the completion callback
     chat_response_buffer: String,
+
+    // Tool system
+    pub tool_registry: crate::tools::ToolRegistry,
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -103,6 +106,8 @@ impl Editor {
             chat_tx,
             chat_rx,
             chat_response_buffer: String::new(),
+            // Tool registry with built-in tools
+            tool_registry: crate::tools::ToolRegistry::new(),
         };
 
         // Load user init file
@@ -388,6 +393,9 @@ impl Editor {
                 Action::Chat { provider, api_key, model, system, messages } => {
                     self.start_chat(&provider, &api_key, &model, system.as_deref(), messages);
                 }
+                Action::ExecuteTool { id, name, input } => {
+                    self.execute_tool(&id, &name, &input);
+                }
                 Action::MinibufferActivate { prompt } => {
                     // Scheme activated minibuffer in generic mode
                     self.minibuffer_mode = MinibufferMode::Generic;
@@ -443,6 +451,54 @@ impl Editor {
         // Start streaming
         self.chat_streaming = true;
         chat_stream(config, api_messages, self.chat_tx.clone());
+    }
+
+    /// Execute a tool from the registry and report result to Scheme
+    fn execute_tool(&mut self, id: &str, name: &str, input: &str) {
+        // Parse input JSON
+        let input_json: serde_json::Value = match serde_json::from_str(input) {
+            Ok(v) => v,
+            Err(e) => {
+                let error_msg = format!("Failed to parse tool input: {}", e);
+                self.report_tool_result(id, false, &error_msg);
+                return;
+            }
+        };
+
+        // Execute the tool
+        let result = self.tool_registry.execute(name, input_json);
+
+        // Report result to Scheme
+        self.report_tool_result(id, result.success, &result.content);
+
+        // Display result in chat buffer
+        if let Some(buf_idx) = self.buffers.iter().position(|b| b.name == "*chat*") {
+            let status = if result.success { "✓" } else { "✗" };
+            let truncated = if result.content.len() > 200 {
+                format!("{}...", &result.content[..200])
+            } else {
+                result.content.clone()
+            };
+            self.buffers[buf_idx].append(&format!("\n[{} Result: {}]\n", status, truncated));
+        }
+    }
+
+    /// Report tool execution result to Scheme
+    fn report_tool_result(&mut self, id: &str, success: bool, content: &str) {
+        let escaped_id = id.replace("\\", "\\\\").replace("\"", "\\\"");
+        let escaped_content = content
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n");
+        let status = if success { "success" } else { "error" };
+
+        let _ = self.run_scheme(
+            "tool_result",
+            &format!(
+                r#"(chat-add-tool-result "{}" "{}" "{}")"#,
+                escaped_id, status, escaped_content
+            ),
+        );
     }
 
     /// Start find-file command

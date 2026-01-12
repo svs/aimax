@@ -101,11 +101,24 @@
 ;; name: the tool name (e.g., "read_file")
 ;; input: JSON string of arguments
 (define (chat-on-tool-use id name input)
-  ;; For now, just log it - Phase 3 will add permission checking and execution
+  ;; Add to pending queue
   (set! *pending-tool-calls*
         (append *pending-tool-calls*
                 (list (list id name input))))
-  (message (string-append "Tool requested: " name)))
+  ;; Try to execute (will check permissions)
+  (process-next-tool))
+
+;; Process the next pending tool call
+(define (process-next-tool)
+  (when (not (null? *pending-tool-calls*))
+    (let* ((tool-call (car *pending-tool-calls*))
+           (id (car tool-call))
+           (name (cadr tool-call))
+           (input (caddr tool-call)))
+      ;; Remove from queue
+      (set! *pending-tool-calls* (cdr *pending-tool-calls*))
+      ;; Execute tool via Rust
+      (execute-rust-tool id name input))))
 
 ;; Get count of pending tool calls
 (define (pending-tool-count)
@@ -114,3 +127,10 @@
 ;; Clear pending tool calls
 (define (clear-pending-tools)
   (set! *pending-tool-calls* '()))
+
+;; Add a tool result to the conversation
+;; This is called after a tool executes (from Rust)
+(define (chat-add-tool-result id status content)
+  (chat-add-message "tool_result" content)
+  ;; Note: In the future, this will trigger continuation of the chat
+  (message (string-append "Tool result: " (if (string=? status "success") "OK" "ERROR"))))
