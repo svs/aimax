@@ -43,7 +43,7 @@ Aimax starts from scratch: **what if buffers and agents were designed together?*
 
 ## What works today
 
-- **Full Emacs-style editing** — ropey-backed buffers, keymaps, minibuffer with completion
+- **Basic editing** — ropey-backed buffers, keymaps, minibuffer with completion. Editing is not a core concern. We just need basic editing because LLMs write most of the stuff here.
 - **M-x command system** — extensible command registry with fuzzy completion
 - **Process buffers** — PTY-based shells, streaming command output
 - **AI chat** — streaming responses from Claude/OpenAI/Ollama
@@ -173,8 +173,8 @@ Just Rust for speed, Scheme for soul, and a deep belief that the best tools are 
 
 ## License
 
-MIT
+MPL-2.0
 
 ---
 
-*Built by humans, for humans who work with AI.*
+*Built by humans with AI for humans who work with AI.*
