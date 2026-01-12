@@ -18,6 +18,7 @@
   "keyboard-quit"
   "ask-ai"
   "ask-ai-continue"
+  "chat-send-from-buffer"
   "chat-clear"
   "shell-command"
   "shell-command-to-buffer"
@@ -29,6 +30,8 @@
   "end-of-line"
   "beginning-of-buffer"
   "end-of-buffer"
+  "view-log"
+  "refresh-log"
 ))
 
 ;; === Commands ===
@@ -133,6 +136,22 @@
       ;; No special handling needed
       (else
        (kill-buffer-named! name)))))
+
+;; === view-log - observe aimax logs ===
+
+(define (view-log)
+  (buffer-create "*log*")
+  (buffer-insert (read-file "/tmp/aimax.log")))
+
+;; Refresh log buffer
+(define (refresh-log)
+  (when (string=? (buffer-name) "*log*")
+    (let ((content (read-file "/tmp/aimax.log")))
+      (beginning-of-buffer)
+      ;; Clear and reload - crude but works
+      (buffer-create "*log*")
+      (buffer-insert content)
+      (end-of-buffer))))
 
 ;; === kill-process command ===
 

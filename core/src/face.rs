@@ -103,6 +103,15 @@ impl FaceRegistry {
             underline: false,
         });
 
+        // Minibuffer current selection (Vertico-style)
+        self.set("minibuffer-current", FaceAttributes {
+            fg: None,
+            bg: Some(Color::new(58, 63, 90)), // subtle purple-gray
+            bold: false,
+            italic: false,
+            underline: false,
+        });
+
         // Syntax highlighting faces (One Dark inspired)
         self.set("font-lock-keyword-face", FaceAttributes {
             fg: Some(Color::new(198, 120, 221)), // purple

@@ -157,6 +157,14 @@
 (define (minibuffer-get-matches) *minibuffer-matches*)
 (define (minibuffer-get-selected) *minibuffer-selected*)
 
+;; Yes-or-no prompt - asks question, calls callback with #t or #f
+;; Like Emacs y-or-no-p but with callback for async
+(define (y-or-no-p prompt callback)
+  (minibuffer-prompt (string-append prompt " (y or n) ")
+    (lambda (answer)
+      (callback (or (string=? answer "y")
+                    (string=? answer "yes"))))))
+
 ;; Handle key event (Rust calls this)
 ;; Returns: 'continue, 'submit, 'cancel
 (define (minibuffer-handle-key key)

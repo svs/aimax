@@ -4,6 +4,22 @@
 //! Scheme defines: provider, model, system prompt, context, handlers.
 
 use futures::StreamExt;
+use std::io::Write;
+
+/// Log to /tmp/aimax.log as s-expressions
+fn log(tag: &str, data: &[(&str, &str)]) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/aimax.log")
+    {
+        // Output as s-expression: (tag (key . "value") (key . "value") ...)
+        let pairs: Vec<String> = data.iter()
+            .map(|(k, v)| format!("({} . \"{}\")", k, v.replace("\"", "\\\"")))
+            .collect();
+        let _ = writeln!(f, "({} {})", tag, pairs.join(" "));
+    }
+}
 use llm::{
     builder::{FunctionBuilder, LLMBackend, LLMBuilder, ParamBuilder},
     chat::{ChatMessage, StreamChunk},
@@ -125,10 +141,24 @@ pub fn chat_stream(
     messages: Vec<Message>,
     tx: Sender<StreamEvent>,
 ) {
+    log("chat-start", &[
+        ("messages", &messages.len().to_string()),
+        ("provider", &format!("{:?}", config.provider)),
+        ("model", &config.model),
+    ]);
+    for (i, m) in messages.iter().enumerate() {
+        log("chat-message", &[
+            ("index", &i.to_string()),
+            ("role", &m.role),
+            ("len", &m.content.len().to_string()),
+        ]);
+    }
+
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             if let Err(e) = stream_chat(&config, &messages, &tx).await {
+                log("chat-error", &[("error", &e.to_string())]);
                 let _ = tx.send(StreamEvent::Error(e.to_string()));
             }
         });

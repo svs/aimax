@@ -38,6 +38,9 @@ fn log(msg: &str) {
     }
 }
 
+/// Spinner frames for AI thinking indicator
+const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
 /// TUI state wrapping the core Editor
 struct Tui {
     editor: Editor,
@@ -45,6 +48,8 @@ struct Tui {
     syntax: SyntaxHighlighter,
     should_quit: bool,
     needs_redraw: bool,
+    /// Frame counter for spinner animation
+    frame: usize,
 }
 
 impl Tui {
@@ -69,6 +74,7 @@ impl Tui {
             syntax: SyntaxHighlighter::new(),
             should_quit: false,
             needs_redraw: true,
+            frame: 0,
         }
     }
 
@@ -122,12 +128,23 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
             tui.needs_redraw = true;
         }
 
+        // Animate spinner while streaming
+        if tui.editor.chat_streaming {
+            tui.frame = tui.frame.wrapping_add(1);
+            tui.needs_redraw = true;
+        }
+
         // Apply any pending face changes
         for (face, key, value) in tui.editor.face_actions.drain(..) {
             if let Err(e) = tui.syntax.faces.set_attribute(&face, &key, &value) {
                 log(&format!("Face error: {}", e));
             }
             tui.needs_redraw = true;
+        }
+
+        // Apply any pending keybindings from Scheme
+        for (key, command) in tui.editor.pending_keybindings.drain(..) {
+            tui.keymaps.global_mut().bind(&key, &command);
         }
 
         // Render
@@ -149,6 +166,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
             let mb_input = tui.editor.minibuffer_input.clone();
             let mb_matches = tui.editor.minibuffer_matches.clone();
             let mb_selected = tui.editor.minibuffer_selected;
+
+            // Get minibuffer-current face for selected item styling
+            let mb_current_face = tui.syntax.faces.get_or_default("minibuffer-current");
 
             terminal.draw(|f| {
                 let size = f.size();
@@ -181,7 +201,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
 
                 // Status line
                 let mod_indicator = if modified { "[+] " } else { "" };
-                let ai_indicator = if chat_streaming { " [AI streaming...]" } else { "" };
+                let ai_indicator = if chat_streaming {
+                    let spinner = SPINNER[tui.frame % SPINNER.len()];
+                    format!(" {} AI thinking...", spinner)
+                } else {
+                    String::new()
+                };
                 let status = format!(" {}{} L{}:C{}{}{}",
                     mod_indicator,
                     buffer_name,
@@ -190,13 +215,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
                     ai_indicator,
                     status_msg.as_deref().map(|s| format!(" {}", s)).unwrap_or_default()
                 );
-                let status_widget = Paragraph::new(status)
-                    .style(Style::default().bg(Color::DarkGray).fg(Color::White));
+                let status_style = if chat_streaming {
+                    Style::default().bg(Color::Blue).fg(Color::White)
+                } else {
+                    Style::default().bg(Color::DarkGray).fg(Color::White)
+                };
+                let status_widget = Paragraph::new(status).style(status_style);
                 f.render_widget(status_widget, chunks[1]);
 
                 // Minibuffer
                 if mb_active {
-                    render_minibuffer(f, chunks[2], &mb_prompt, &mb_input, &mb_matches, mb_selected);
+                    render_minibuffer(f, chunks[2], &mb_prompt, &mb_input, &mb_matches, mb_selected, &mb_current_face);
                 } else {
                     let mini = Paragraph::new(status_msg.as_deref().unwrap_or(""));
                     f.render_widget(mini, chunks[2]);
@@ -206,13 +235,19 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
 
         // Handle input
         if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key_event) = event::read()? {
-                tui.needs_redraw = true;
-                if tui.editor.minibuffer_active {
-                    handle_minibuffer_key(tui, &key_event);
-                } else {
-                    handle_buffer_key(tui, &key_event);
+            match event::read()? {
+                Event::Key(key_event) => {
+                    tui.needs_redraw = true;
+                    if tui.editor.minibuffer_active {
+                        handle_minibuffer_key(tui, &key_event);
+                    } else {
+                        handle_buffer_key(tui, &key_event);
+                    }
                 }
+                Event::Resize(_, _) => {
+                    tui.needs_redraw = true;
+                }
+                _ => {}
             }
         }
 
@@ -298,6 +333,7 @@ fn render_minibuffer(
     input: &str,
     matches: &[String],
     selected: usize,
+    current_face: &aimax_core::FaceAttributes,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -312,12 +348,24 @@ fn render_minibuffer(
     f.render_widget(prompt_widget, chunks[0]);
 
     if !matches.is_empty() && chunks[1].height > 0 {
+        // Convert face to ratatui Style
+        let selected_style = {
+            let mut style = Style::default();
+            if let Some(bg) = current_face.bg {
+                style = style.bg(Color::Rgb(bg.r, bg.g, bg.b));
+            }
+            if let Some(fg) = current_face.fg {
+                style = style.fg(Color::Rgb(fg.r, fg.g, fg.b));
+            }
+            style
+        };
+
         let items: Vec<ListItem> = matches.iter()
             .enumerate()
             .take(chunks[1].height as usize)
             .map(|(i, m)| {
                 let style = if i == selected {
-                    Style::default().bg(Color::Blue).fg(Color::White)
+                    selected_style
                 } else {
                     Style::default()
                 };

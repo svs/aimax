@@ -69,6 +69,8 @@ pub enum Action {
     },
     // Minibuffer - Scheme activated generic minibuffer, pushes state through
     MinibufferActivate { prompt: String },
+    // Keybindings
+    GlobalSetKey { key: String, command: String },
 }
 
 /// Shared state for Scheme to query buffer contents
@@ -913,6 +915,14 @@ fn register_primitives(
     engine.register_fn("minibuffer-activate!", move |prompt: String| {
         if let Ok(mut queue) = actions_clone.lock() {
             queue.push(Action::MinibufferActivate { prompt });
+        }
+    });
+
+    // (global-set-key key command) - bind key to command
+    let actions_clone = actions.clone();
+    engine.register_fn("global-set-key", move |key: String, command: String| {
+        if let Ok(mut queue) = actions_clone.lock() {
+            queue.push(Action::GlobalSetKey { key, command });
         }
     });
 

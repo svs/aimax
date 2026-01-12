@@ -6,6 +6,22 @@
 ;;;   (set! *ai-model* "claude-sonnet-4-20250514")
 ;;;   (set! *ai-system* "You are a helpful assistant.")
 
+;; === String helpers ===
+;; Simple string-trim (removes leading/trailing spaces)
+(define (string-trim str)
+  (let* ((len (string-length str))
+         (start (let loop ((i 0))
+                  (if (>= i len) len
+                      (if (char=? (string-ref str i) #\space)
+                          (loop (+ i 1))
+                          i))))
+         (end (let loop ((i (- len 1)))
+                (if (< i start) start
+                    (if (char=? (string-ref str i) #\space)
+                        (loop (- i 1))
+                        (+ i 1))))))
+    (substring str start end)))
+
 ;; Configuration (user overrides in init.scm)
 (define *ai-provider* "anthropic")
 (define *ai-api-key* (getenv "CLAUDE_API_KEY"))
@@ -29,12 +45,14 @@
 ;; Called by Rust when assistant response completes
 ;; This adds the response to history for multi-turn
 (define (chat-on-response-complete response)
-  (chat-add-message "assistant" response))
+  (chat-add-message "assistant" response)
+  (message (string-append "Chat history: " (number->string (length *chat-messages*)) " messages")))
 
 ;; Send a message in a multi-turn conversation
 ;; Adds user message to history and sends full history to LLM
 (define (chat-send prompt)
   (chat-add-message "user" prompt)
+  (message (string-append "Sending " (number->string (length *chat-messages*)) " messages..."))
   (ai-chat-messages *ai-provider* *ai-api-key* *ai-model*
                     *ai-system* *chat-messages*))
 
@@ -87,6 +105,39 @@
 (define (ask-ai-continue)
   (minibuffer-prompt "Continue: " chat-send))
 
+;; Send from buffer - grab text after last >>> and send
+;; Bound to C-c C-c in chat buffers
+(define (chat-send-from-buffer)
+  (message "chat-send-from-buffer called")
+  (let* ((text (buffer-text))
+         (prompt-pos (string-last-index-of text ">>> ")))
+    (message (string-append "prompt-pos: " (if prompt-pos (number->string prompt-pos) "false")))
+    (if prompt-pos
+        (let ((input (substring text (+ prompt-pos 4))))
+          (message (string-append "input: [" (string-trim input) "]"))
+          (if (> (string-length (string-trim input)) 0)
+              (chat-send (string-trim input))
+              (message "No input after >>>")))
+        (message "No >>> prompt found"))))
+
+;; Helper: find last occurrence of substring
+(define (string-last-index-of str substr)
+  (let loop ((pos 0) (last-found #f))
+    (let ((found (string-find str substr pos)))
+      (if found
+          (loop (+ found 1) found)
+          last-found))))
+
+;; Helper: find substring starting at pos
+(define (string-find str substr start)
+  (let ((len (string-length str))
+        (sublen (string-length substr)))
+    (let loop ((i start))
+      (cond
+        ((> (+ i sublen) len) #f)
+        ((string=? (substring str i (+ i sublen)) substr) i)
+        (else (loop (+ i 1)))))))
+
 ;; Get message count for debugging
 (define (chat-message-count)
   (length *chat-messages*))
@@ -134,3 +185,7 @@
   (chat-add-message "tool_result" content)
   ;; Note: In the future, this will trigger continuation of the chat
   (message (string-append "Tool result: " (if (string=? status "success") "OK" "ERROR"))))
+
+;; === Keybindings ===
+;; C-c C-c to send chat from buffer (like gptel)
+(global-set-key "C-c C-c" "chat-send-from-buffer")

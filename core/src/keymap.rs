@@ -209,9 +209,11 @@ impl Keymap {
         km.bind("C-x 3", "split-window-right");
         km.bind("C-x o", "other-window");
 
-        // === M-x and help ===
+        // === M-x, M-:, and help ===
         km.bind("M-x", "execute-extended-command");
         km.bind("escape x", "execute-extended-command");  // Escape as Meta prefix
+        km.bind("M-:", "eval-expression");
+        km.bind("escape :", "eval-expression");
         km.bind("C-h k", "describe-key");
         km.bind("C-h f", "describe-function");
 
@@ -232,6 +234,7 @@ impl Keymap {
 
         // === AI ===
         km.bind("C-x a", "ask-ai");
+        // C-c C-c bound in Scheme (chat.scm)
 
         km
     }

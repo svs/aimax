@@ -59,9 +59,14 @@ pub struct Editor {
     chat_rx: Receiver<StreamEvent>,
     /// Accumulates the current assistant response for the completion callback
     chat_response_buffer: String,
+    /// Accumulates text for paragraph-by-paragraph display
+    chat_display_buffer: String,
 
     // Tool system
     pub tool_registry: crate::tools::ToolRegistry,
+
+    // Keybinding requests for TUI to apply
+    pub pending_keybindings: Vec<(String, String)>,  // (key, command)
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -106,8 +111,10 @@ impl Editor {
             chat_tx,
             chat_rx,
             chat_response_buffer: String::new(),
+            chat_display_buffer: String::new(),
             // Tool registry with built-in tools
             tool_registry: crate::tools::ToolRegistry::new(),
+            pending_keybindings: Vec::new(),
         };
 
         // Load user init file
@@ -404,6 +411,10 @@ impl Editor {
                     self.minibuffer_input = String::new();
                     self.minibuffer_matches = vec![];
                     self.minibuffer_selected = 0;
+                }
+                Action::GlobalSetKey { key, command } => {
+                    // Queue for TUI to apply to keymap
+                    self.pending_keybindings.push((key, command));
                 }
             }
         }
@@ -821,15 +832,29 @@ impl Editor {
                 StreamEvent::Text(text) => {
                     // Accumulate response for completion callback
                     self.chat_response_buffer.push_str(&text);
-                    // Find *chat* buffer and append
-                    if let Some(buf_idx) = self.buffers.iter().position(|b| b.name == "*chat*") {
-                        self.buffers[buf_idx].append(&text);
+                    // Accumulate for display, flush on paragraph breaks
+                    self.chat_display_buffer.push_str(&text);
+
+                    // Flush on double newline (paragraph break)
+                    if self.chat_display_buffer.contains("\n\n") {
+                        if let Some(buf_idx) = self.buffers.iter().position(|b| b.name == "*chat*") {
+                            self.buffers[buf_idx].append(&self.chat_display_buffer);
+                        }
+                        self.chat_display_buffer.clear();
                     }
                 }
                 StreamEvent::Done => {
-                    // Append newlines for separation
+                    // Flush any remaining text
+                    if !self.chat_display_buffer.is_empty() {
+                        if let Some(buf_idx) = self.buffers.iter().position(|b| b.name == "*chat*") {
+                            self.buffers[buf_idx].append(&self.chat_display_buffer);
+                        }
+                        self.chat_display_buffer.clear();
+                    }
+
+                    // Append prompt for user's turn
                     if let Some(buf_idx) = self.buffers.iter().position(|b| b.name == "*chat*") {
-                        self.buffers[buf_idx].append("\n\n");
+                        self.buffers[buf_idx].append("\n\n>>> ");
                     }
                     self.chat_streaming = false;
 
