@@ -43,6 +43,7 @@ pub enum Action {
     SwitchBufferInteractive,
     SaveBuffer,
     KillBuffer,
+    KillBufferNamed(String),
     KeyboardQuit,
     Newline,
     // Face system
@@ -71,6 +72,10 @@ pub struct SharedState {
     pub buffer_text: String,
     pub buffer_lines: Vec<String>,
     pub buffer_file_paths: Vec<String>,  // All open buffer file paths
+    pub buffer_names: Vec<String>,        // All buffer names
+    pub buffer_modified: bool,            // Is current buffer modified?
+    pub buffer_modified_map: std::collections::HashMap<String, bool>,  // name -> modified?
+    pub buffer_locals_map: std::collections::HashMap<String, std::collections::HashMap<String, String>>,  // buffer -> (key -> value)
     pub process_names: Vec<String>,       // Names of running processes
     pub buffer_major_mode: String,         // Current buffer's major mode
     pub buffer_name: String,               // Current buffer name
@@ -505,6 +510,33 @@ fn register_primitives(
         state.read().map(|s| s.buffer_name.clone()).unwrap_or_default()
     });
 
+    // (buffer-names) - all buffer names
+    let state = shared_state.clone();
+    engine.register_fn("buffer-names", move || -> Vec<String> {
+        state.read().map(|s| s.buffer_names.clone()).unwrap_or_default()
+    });
+
+    // (process-names) - names of running processes
+    let state = shared_state.clone();
+    engine.register_fn("process-names", move || -> Vec<String> {
+        state.read().map(|s| s.process_names.clone()).unwrap_or_default()
+    });
+
+    // (buffer-modified?) - is current buffer modified?
+    let state = shared_state.clone();
+    engine.register_fn("buffer-modified?", move || -> bool {
+        state.read().map(|s| s.buffer_modified).unwrap_or(false)
+    });
+
+    // (buffer-modified-p name) - is specific buffer modified?
+    let state = shared_state.clone();
+    engine.register_fn("buffer-modified-p", move |name: String| -> bool {
+        state.read()
+            .ok()
+            .and_then(|s| s.buffer_modified_map.get(&name).copied())
+            .unwrap_or(false)
+    });
+
     // (major-mode) - current buffer's major mode
     let state = shared_state.clone();
     engine.register_fn("major-mode", move || -> String {
@@ -517,6 +549,15 @@ fn register_primitives(
         state.read()
             .ok()
             .and_then(|s| s.buffer_locals.get(&key).cloned())
+            .unwrap_or_default()
+    });
+
+    // (buffer-local-p buffer-name key) - get local from specific buffer
+    let state = shared_state.clone();
+    engine.register_fn("buffer-local-p", move |buffer_name: String, key: String| -> String {
+        state.read()
+            .ok()
+            .and_then(|s| s.buffer_locals_map.get(&buffer_name)?.get(&key).cloned())
             .unwrap_or_default()
     });
 
@@ -697,6 +738,13 @@ fn register_primitives(
     engine.register_fn("kill-buffer!", move || {
         if let Ok(mut queue) = actions_clone.lock() {
             queue.push(Action::KillBuffer);
+        }
+    });
+
+    let actions_clone = actions.clone();
+    engine.register_fn("kill-buffer-named!", move |name: String| {
+        if let Ok(mut queue) = actions_clone.lock() {
+            queue.push(Action::KillBufferNamed(name));
         }
     });
 
@@ -1134,5 +1182,35 @@ mod tests {
         } else {
             panic!("Expected list, got: {:?}", result);
         }
+    }
+
+    #[test]
+    fn test_chat_message_history() {
+        let mut interp = Interpreter::with_core();
+
+        // Initially, chat history should be empty
+        let result = interp.run("(chat-message-count)").unwrap();
+        assert_eq!(result, SteelVal::IntV(0), "History should start empty");
+
+        // Add a user message
+        let result = interp.run(r#"(chat-add-message "user" "Hello")"#);
+        assert!(result.is_ok(), "Should be able to add message");
+
+        let result = interp.run("(chat-message-count)").unwrap();
+        assert_eq!(result, SteelVal::IntV(1), "Should have 1 message");
+
+        // Add an assistant message (simulates what chat-on-response-complete does)
+        let result = interp.run(r#"(chat-on-response-complete "Hi there!")"#);
+        assert!(result.is_ok(), "Should be able to add response");
+
+        let result = interp.run("(chat-message-count)").unwrap();
+        assert_eq!(result, SteelVal::IntV(2), "Should have 2 messages");
+
+        // Clear history
+        let result = interp.run("(chat-clear)");
+        assert!(result.is_ok(), "Should be able to clear");
+
+        let result = interp.run("(chat-message-count)").unwrap();
+        assert_eq!(result, SteelVal::IntV(0), "History should be empty after clear");
     }
 }

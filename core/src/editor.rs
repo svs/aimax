@@ -57,6 +57,8 @@ pub struct Editor {
     pub chat_streaming: bool,
     chat_tx: Sender<StreamEvent>,
     chat_rx: Receiver<StreamEvent>,
+    /// Accumulates the current assistant response for the completion callback
+    chat_response_buffer: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -100,6 +102,7 @@ impl Editor {
             chat_streaming: false,
             chat_tx,
             chat_rx,
+            chat_response_buffer: String::new(),
         };
 
         // Load user init file
@@ -151,12 +154,34 @@ impl Editor {
                 .filter_map(|b| b.file_path.as_ref())
                 .map(|p| p.to_string_lossy().to_string())
                 .collect();
+            // Sync all buffer names
+            state.buffer_names = self.buffers.iter()
+                .map(|b| b.name.clone())
+                .collect();
+            // Sync modified status and locals for each buffer
+            state.buffer_modified_map.clear();
+            state.buffer_locals_map.clear();
+            for buf in &self.buffers {
+                state.buffer_modified_map.insert(buf.name.clone(), buf.is_modified());
+                // Stringify locals for this buffer
+                let mut locals = std::collections::HashMap::new();
+                for (k, v) in &buf.locals {
+                    let val = match v {
+                        crate::buffer::LocalVar::String(s) => s.clone(),
+                        crate::buffer::LocalVar::Int(n) => n.to_string(),
+                        crate::buffer::LocalVar::Bool(b) => b.to_string(),
+                    };
+                    locals.insert(k.clone(), val);
+                }
+                state.buffer_locals_map.insert(buf.name.clone(), locals);
+            }
             // Sync running process names
             state.process_names = self.processes.list();
             // Sync current buffer info
             let buf = &self.buffers[self.current];
             state.buffer_name = buf.name.clone();
             state.buffer_major_mode = buf.major_mode.clone();
+            state.buffer_modified = buf.is_modified();
             // Sync buffer locals (stringify values)
             state.buffer_locals.clear();
             for (k, v) in &buf.locals {
@@ -274,6 +299,23 @@ impl Editor {
                         self.status_message = Some(format!("Killed {}", name));
                     } else {
                         self.status_message = Some("Can't kill last buffer".to_string());
+                    }
+                }
+                Action::KillBufferNamed(name) => {
+                    if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+                        if self.buffers.len() > 1 {
+                            self.buffers.remove(idx);
+                            if self.current >= self.buffers.len() {
+                                self.current = self.buffers.len() - 1;
+                            } else if self.current > idx {
+                                self.current -= 1;
+                            }
+                            self.status_message = Some(format!("Killed {}", name));
+                        } else {
+                            self.status_message = Some("Can't kill last buffer".to_string());
+                        }
+                    } else {
+                        self.status_message = Some(format!("No buffer named {}", name));
                     }
                 }
                 Action::KeyboardQuit => {
@@ -720,6 +762,8 @@ impl Editor {
             processed = true;
             match event {
                 StreamEvent::Text(text) => {
+                    // Accumulate response for completion callback
+                    self.chat_response_buffer.push_str(&text);
                     // Find *chat* buffer and append
                     if let Some(buf_idx) = self.buffers.iter().position(|b| b.name == "*chat*") {
                         self.buffers[buf_idx].append(&text);
@@ -731,9 +775,15 @@ impl Editor {
                         self.buffers[buf_idx].append("\n\n");
                     }
                     self.chat_streaming = false;
+
+                    // Call Scheme callback with the complete response
+                    let response = std::mem::take(&mut self.chat_response_buffer);
+                    let escaped = response.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+                    let _ = self.run_scheme("chat_complete", &format!(r#"(chat-on-response-complete "{}")"#, escaped));
                 }
                 StreamEvent::Error(err) => {
                     self.chat_streaming = false;
+                    self.chat_response_buffer.clear();
                     self.status_message = Some(format!("Chat error: {}", err));
                     // Also append error to chat buffer
                     if let Some(buf_idx) = self.buffers.iter().position(|b| b.name == "*chat*") {
