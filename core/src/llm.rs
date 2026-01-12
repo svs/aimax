@@ -1,17 +1,39 @@
-//! LLM Client - Multi-provider streaming
+//! LLM Client - Multi-provider streaming with tool use
 //!
 //! Rust does the heavy lifting: HTTP, streaming, parsing.
 //! Scheme defines: provider, model, system prompt, context, handlers.
 
 use futures::StreamExt;
-use llm::{builder::{LLMBackend, LLMBuilder}, chat::ChatMessage};
+use llm::{
+    builder::{FunctionBuilder, LLMBackend, LLMBuilder, ParamBuilder},
+    chat::{ChatMessage, StreamChunk},
+    FunctionCall, LLMProvider, ToolCall,
+};
 use std::sync::mpsc::Sender;
 
 /// Message in a conversation
 #[derive(Debug, Clone)]
 pub struct Message {
-    pub role: String,      // "user" or "assistant"
+    pub role: String,      // "user", "assistant", "tool_result"
     pub content: String,
+    pub tool_use_id: Option<String>,  // For tool_result messages
+}
+
+/// Tool definition for the LLM
+#[derive(Debug, Clone)]
+pub struct Tool {
+    pub name: String,
+    pub description: String,
+    pub parameters: Vec<ToolParam>,
+}
+
+/// Tool parameter definition
+#[derive(Debug, Clone)]
+pub struct ToolParam {
+    pub name: String,
+    pub param_type: String,  // "string", "number", "boolean", "object", "array"
+    pub description: String,
+    pub required: bool,
 }
 
 /// Streamed event from LLM
@@ -19,6 +41,12 @@ pub struct Message {
 pub enum StreamEvent {
     /// Text chunk
     Text(String),
+    /// Tool use request from the LLM
+    ToolUse {
+        id: String,
+        name: String,
+        input: String,  // JSON string of arguments
+    },
     /// Stream complete
     Done,
     /// Error occurred
@@ -72,6 +100,7 @@ pub struct ChatConfig {
     pub model: String,
     pub system: Option<String>,
     pub max_tokens: u32,
+    pub tools: Vec<Tool>,
 }
 
 impl Default for ChatConfig {
@@ -82,6 +111,7 @@ impl Default for ChatConfig {
             model: "claude-sonnet-4-20250514".to_string(),
             system: None,
             max_tokens: 4096,
+            tools: Vec::new(),
         }
     }
 }
@@ -121,21 +151,130 @@ async fn stream_chat(
         builder = builder.system(system);
     }
 
+    // Add tools if provided
+    for tool in &config.tools {
+        let mut func_builder = FunctionBuilder::new(&tool.name)
+            .description(&tool.description);
+
+        let mut required_params = Vec::new();
+
+        for param in &tool.parameters {
+            func_builder = func_builder.param(
+                ParamBuilder::new(&param.name)
+                    .type_of(&param.param_type)
+                    .description(&param.description)
+            );
+            if param.required {
+                required_params.push(param.name.clone());
+            }
+        }
+
+        if !required_params.is_empty() {
+            func_builder = func_builder.required(required_params);
+        }
+
+        builder = builder.function(func_builder);
+    }
+
     let llm = builder.build()?;
 
     // Convert messages to ChatMessage format
     let chat_messages: Vec<ChatMessage> = messages.iter()
         .map(|m| {
-            if m.role == "assistant" {
-                ChatMessage::assistant().content(&m.content).build()
-            } else {
-                ChatMessage::user().content(&m.content).build()
+            match m.role.as_str() {
+                "assistant" => ChatMessage::assistant().content(&m.content).build(),
+                "tool_result" => {
+                    // Tool results are sent back with the tool_use_id
+                    let id = m.tool_use_id.as_deref().unwrap_or("").to_string();
+                    let tool_call = ToolCall {
+                        id,
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: String::new(),  // Not needed for results
+                            arguments: m.content.clone(),
+                        },
+                    };
+                    ChatMessage::user()
+                        .tool_result(vec![tool_call])
+                        .build()
+                }
+                _ => ChatMessage::user().content(&m.content).build(),
             }
         })
         .collect();
 
-    // Stream the response
-    let mut stream = llm.chat_stream(&chat_messages).await?;
+    // Use tool-enabled streaming if tools are configured
+    if !config.tools.is_empty() {
+        stream_with_tools(&llm, &chat_messages, tx).await
+    } else {
+        stream_text_only(&llm, &chat_messages, tx).await
+    }
+}
+
+/// Stream a response with tool support
+async fn stream_with_tools(
+    llm: &Box<dyn LLMProvider>,
+    messages: &[ChatMessage],
+    tx: &Sender<StreamEvent>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let tools = llm.tools().map(|t| t.to_vec()).unwrap_or_default();
+    let tools_ref: Option<&[_]> = if tools.is_empty() { None } else { Some(&tools) };
+    let mut stream = llm.chat_stream_with_tools(messages, tools_ref).await?;
+
+    // Track tool use accumulation (input arrives in chunks)
+    let mut current_tool: Option<(String, String, String)> = None; // (id, name, json_buffer)
+
+    while let Some(chunk_result) = stream.next().await {
+        match chunk_result {
+            Ok(chunk) => match chunk {
+                StreamChunk::Text(text) => {
+                    let _ = tx.send(StreamEvent::Text(text));
+                }
+                StreamChunk::ToolUseStart { id, name, .. } => {
+                    // Start accumulating tool input
+                    current_tool = Some((id, name, String::new()));
+                }
+                StreamChunk::ToolUseInputDelta { partial_json, .. } => {
+                    // Accumulate JSON chunks
+                    if let Some((_, _, ref mut buffer)) = current_tool {
+                        buffer.push_str(&partial_json);
+                    }
+                }
+                StreamChunk::ToolUseComplete { tool_call, .. } => {
+                    // Send the complete tool use event
+                    let _ = tx.send(StreamEvent::ToolUse {
+                        id: tool_call.id,
+                        name: tool_call.function.name,
+                        input: tool_call.function.arguments,
+                    });
+                    current_tool = None;
+                }
+                StreamChunk::Done { .. } => {
+                    // If we have an incomplete tool use, send what we have
+                    if let Some((id, name, input)) = current_tool.take() {
+                        let _ = tx.send(StreamEvent::ToolUse { id, name, input });
+                    }
+                    let _ = tx.send(StreamEvent::Done);
+                }
+            },
+            Err(e) => {
+                let _ = tx.send(StreamEvent::Error(e.to_string()));
+            }
+        }
+    }
+
+    // Ensure Done is sent if stream ends without explicit Done chunk
+    let _ = tx.send(StreamEvent::Done);
+    Ok(())
+}
+
+/// Stream a text-only response (no tools)
+async fn stream_text_only(
+    llm: &Box<dyn LLMProvider>,
+    messages: &[ChatMessage],
+    tx: &Sender<StreamEvent>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut stream = llm.chat_stream(messages).await?;
 
     while let Some(Ok(token)) = stream.next().await {
         let _ = tx.send(StreamEvent::Text(token));
@@ -156,5 +295,65 @@ mod tests {
         assert!(matches!(Provider::from_str("ollama"), Provider::Ollama));
         assert!(matches!(Provider::from_str("gemini"), Provider::Gemini));
         assert!(matches!(Provider::from_str("google"), Provider::Gemini));
+    }
+
+    #[test]
+    fn test_tool_definition() {
+        let tool = Tool {
+            name: "read_file".to_string(),
+            description: "Read contents of a file".to_string(),
+            parameters: vec![
+                ToolParam {
+                    name: "path".to_string(),
+                    param_type: "string".to_string(),
+                    description: "The file path to read".to_string(),
+                    required: true,
+                },
+            ],
+        };
+
+        assert_eq!(tool.name, "read_file");
+        assert_eq!(tool.parameters.len(), 1);
+        assert!(tool.parameters[0].required);
+    }
+
+    #[test]
+    fn test_message_with_tool_use_id() {
+        let msg = Message {
+            role: "tool_result".to_string(),
+            content: r#"{"content": "file contents"}"#.to_string(),
+            tool_use_id: Some("call_123".to_string()),
+        };
+
+        assert_eq!(msg.role, "tool_result");
+        assert!(msg.tool_use_id.is_some());
+        assert_eq!(msg.tool_use_id.unwrap(), "call_123");
+    }
+
+    #[test]
+    fn test_stream_event_variants() {
+        let text_event = StreamEvent::Text("Hello".to_string());
+        assert!(matches!(text_event, StreamEvent::Text(_)));
+
+        let tool_event = StreamEvent::ToolUse {
+            id: "call_123".to_string(),
+            name: "read_file".to_string(),
+            input: r#"{"path":"/test.txt"}"#.to_string(),
+        };
+        assert!(matches!(tool_event, StreamEvent::ToolUse { .. }));
+
+        let done_event = StreamEvent::Done;
+        assert!(matches!(done_event, StreamEvent::Done));
+
+        let error_event = StreamEvent::Error("Something went wrong".to_string());
+        assert!(matches!(error_event, StreamEvent::Error(_)));
+    }
+
+    #[test]
+    fn test_chat_config_default() {
+        let config = ChatConfig::default();
+        assert!(matches!(config.provider, Provider::Anthropic));
+        assert_eq!(config.max_tokens, 4096);
+        assert!(config.tools.is_empty());
     }
 }

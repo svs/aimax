@@ -90,3 +90,27 @@
 ;; Get message count for debugging
 (define (chat-message-count)
   (length *chat-messages*))
+
+;; === Tool Use Support ===
+
+;; Pending tool calls waiting for execution/permission
+(define *pending-tool-calls* '())
+
+;; Called by Rust when the LLM requests a tool use
+;; id: unique identifier for this tool call
+;; name: the tool name (e.g., "read_file")
+;; input: JSON string of arguments
+(define (chat-on-tool-use id name input)
+  ;; For now, just log it - Phase 3 will add permission checking and execution
+  (set! *pending-tool-calls*
+        (append *pending-tool-calls*
+                (list (list id name input))))
+  (message (string-append "Tool requested: " name)))
+
+;; Get count of pending tool calls
+(define (pending-tool-count)
+  (length *pending-tool-calls*))
+
+;; Clear pending tool calls
+(define (clear-pending-tools)
+  (set! *pending-tool-calls* '()))

@@ -432,11 +432,12 @@ impl Editor {
             model: model.to_string(),
             system: system.map(|s| s.to_string()),
             max_tokens: 4096,
+            tools: Vec::new(),  // TODO: Get tools from Scheme
         };
 
         // Build messages for API
         let api_messages: Vec<Message> = messages.into_iter()
-            .map(|(role, content)| Message { role, content })
+            .map(|(role, content)| Message { role, content, tool_use_id: None })
             .collect();
 
         // Start streaming
@@ -780,6 +781,22 @@ impl Editor {
                     let response = std::mem::take(&mut self.chat_response_buffer);
                     let escaped = response.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
                     let _ = self.run_scheme("chat_complete", &format!(r#"(chat-on-response-complete "{}")"#, escaped));
+                }
+                StreamEvent::ToolUse { id, name, input } => {
+                    // Call Scheme callback for tool use
+                    // Scheme will handle permission checking and execution
+                    let escaped_id = id.replace("\\", "\\\\").replace("\"", "\\\"");
+                    let escaped_name = name.replace("\\", "\\\\").replace("\"", "\\\"");
+                    let escaped_input = input.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+                    let _ = self.run_scheme("tool_use", &format!(
+                        r#"(chat-on-tool-use "{}" "{}" "{}")"#,
+                        escaped_id, escaped_name, escaped_input
+                    ));
+
+                    // Display tool use in chat buffer
+                    if let Some(buf_idx) = self.buffers.iter().position(|b| b.name == "*chat*") {
+                        self.buffers[buf_idx].append(&format!("\n[Tool: {} → {}]\n", name, input));
+                    }
                 }
                 StreamEvent::Error(err) => {
                     self.chat_streaming = false;

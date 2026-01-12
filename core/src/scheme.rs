@@ -1213,4 +1213,34 @@ mod tests {
         let result = interp.run("(chat-message-count)").unwrap();
         assert_eq!(result, SteelVal::IntV(0), "History should be empty after clear");
     }
+
+    #[test]
+    fn test_tool_use_callback() {
+        let mut interp = Interpreter::with_core();
+
+        // Initially, no pending tool calls
+        let result = interp.run("(pending-tool-count)").unwrap();
+        assert_eq!(result, SteelVal::IntV(0), "Should start with no pending tools");
+
+        // Simulate a tool use callback from the LLM
+        let result = interp.run(r#"(chat-on-tool-use "call_123" "read_file" "{\"path\":\"/test.txt\"}")"#);
+        assert!(result.is_ok(), "Should handle tool use callback");
+
+        let result = interp.run("(pending-tool-count)").unwrap();
+        assert_eq!(result, SteelVal::IntV(1), "Should have 1 pending tool call");
+
+        // Add another tool call
+        let result = interp.run(r#"(chat-on-tool-use "call_456" "write_file" "{\"path\":\"/out.txt\",\"content\":\"hello\"}")"#);
+        assert!(result.is_ok(), "Should handle second tool use callback");
+
+        let result = interp.run("(pending-tool-count)").unwrap();
+        assert_eq!(result, SteelVal::IntV(2), "Should have 2 pending tool calls");
+
+        // Clear pending tools
+        let result = interp.run("(clear-pending-tools)");
+        assert!(result.is_ok(), "Should be able to clear pending tools");
+
+        let result = interp.run("(pending-tool-count)").unwrap();
+        assert_eq!(result, SteelVal::IntV(0), "Should have no pending tools after clear");
+    }
 }
