@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, RwLock};
 pub enum Action {
     Insert(String),
     Delete,
+    CreateBuffer(String),
     SwitchBuffer(String),
     Open(String),
     Message(String),
@@ -41,13 +42,26 @@ pub enum Action {
     FindFileInteractive,
     SwitchBufferInteractive,
     SaveBuffer,
+    KillBuffer,
     KeyboardQuit,
     Newline,
     // Face system
     SetFaceAttribute { face: String, key: String, value: String },
     // Process system
     StartProcess { name: String, command: String, args: Vec<String> },
+    StartProcessSimple { name: String, command: String, args: Vec<String> },
     ProcessSendString { name: String, text: String },
+    KillProcess { name: String },
+    // Chat system
+    Chat {
+        provider: String,  // "anthropic", "openai", "ollama", etc.
+        api_key: String,
+        model: String,
+        system: Option<String>,
+        messages: Vec<(String, String)>,  // (role, content)
+    },
+    // Minibuffer - Scheme activated generic minibuffer, pushes state through
+    MinibufferActivate { prompt: String },
 }
 
 /// Shared state for Scheme to query buffer contents
@@ -58,6 +72,9 @@ pub struct SharedState {
     pub buffer_lines: Vec<String>,
     pub buffer_file_paths: Vec<String>,  // All open buffer file paths
     pub process_names: Vec<String>,       // Names of running processes
+    pub buffer_major_mode: String,         // Current buffer's major mode
+    pub buffer_name: String,               // Current buffer name
+    pub buffer_locals: std::collections::HashMap<String, String>,  // Buffer local vars (stringified)
 }
 
 /// The Scheme interpreter
@@ -76,6 +93,17 @@ const CORE_SCHEME: &str = r#"
     (cond ((< i 0) #f)
           ((string=? (substring str i (+ i 1)) char) i)
           (else (loop (- i 1))))))
+
+;; Check if haystack contains needle
+(define (string-contains? haystack needle)
+  (let ((hlen (string-length haystack))
+        (nlen (string-length needle)))
+    (if (> nlen hlen)
+        #f
+        (let loop ((i 0))
+          (cond ((> (+ i nlen) hlen) #f)
+                ((string=? (substring haystack i (+ i nlen)) needle) #t)
+                (else (loop (+ i 1))))))))
 
 (define (parse-file-input input cwd)
   (let* ((expanded (expand-path input cwd))
@@ -258,6 +286,16 @@ impl Interpreter {
                 if let Ok(code) = std::fs::read_to_string(&desktop_path) {
                     if let Err(e) = interp.run(&code) {
                         eprintln!("Warning: Failed to load {}: {}", desktop_path.display(), e);
+                    }
+                }
+            }
+
+            // Load chat.scm - AI chat configuration
+            let chat_path = dir.join("chat.scm");
+            if chat_path.exists() {
+                if let Ok(code) = std::fs::read_to_string(&chat_path) {
+                    if let Err(e) = interp.run(&code) {
+                        eprintln!("Warning: Failed to load {}: {}", chat_path.display(), e);
                     }
                 }
             }
@@ -461,6 +499,27 @@ fn register_primitives(
         state.read().map(|s| s.buffer_file_paths.clone()).unwrap_or_default()
     });
 
+    // (buffer-name) - current buffer name
+    let state = shared_state.clone();
+    engine.register_fn("buffer-name", move || -> String {
+        state.read().map(|s| s.buffer_name.clone()).unwrap_or_default()
+    });
+
+    // (major-mode) - current buffer's major mode
+    let state = shared_state.clone();
+    engine.register_fn("major-mode", move || -> String {
+        state.read().map(|s| s.buffer_major_mode.clone()).unwrap_or_default()
+    });
+
+    // (buffer-local key) - get buffer-local variable
+    let state = shared_state.clone();
+    engine.register_fn("buffer-local", move |key: String| -> String {
+        state.read()
+            .ok()
+            .and_then(|s| s.buffer_locals.get(&key).cloned())
+            .unwrap_or_default()
+    });
+
     // ===== Buffer Write Primitives =====
 
     let actions_clone = actions.clone();
@@ -474,6 +533,13 @@ fn register_primitives(
     engine.register_fn("buffer-delete", move || {
         if let Ok(mut queue) = actions_clone.lock() {
             queue.push(Action::Delete);
+        }
+    });
+
+    let actions_clone = actions.clone();
+    engine.register_fn("buffer-create", move |name: String| {
+        if let Ok(mut queue) = actions_clone.lock() {
+            queue.push(Action::CreateBuffer(name));
         }
     });
 
@@ -628,6 +694,13 @@ fn register_primitives(
     });
 
     let actions_clone = actions.clone();
+    engine.register_fn("kill-buffer!", move || {
+        if let Ok(mut queue) = actions_clone.lock() {
+            queue.push(Action::KillBuffer);
+        }
+    });
+
+    let actions_clone = actions.clone();
     engine.register_fn("keyboard-quit!", move || {
         if let Ok(mut queue) = actions_clone.lock() {
             queue.push(Action::KeyboardQuit);
@@ -654,12 +727,21 @@ fn register_primitives(
 
     // ===== Process Primitives =====
 
-    // (start-process name command args...)
+    // (start-process name command args...) - PTY-based, for interactive
     // Example: (start-process "*shell*" "/bin/bash" '())
     let actions_clone = actions.clone();
     engine.register_fn("start-process", move |name: String, command: String, args: Vec<String>| {
         if let Ok(mut queue) = actions_clone.lock() {
             queue.push(Action::StartProcess { name, command, args });
+        }
+    });
+
+    // (start-process-simple name command args...) - piped stdout, for tail/streaming
+    // Example: (start-process-simple "*tail*" "tail" '("-f" "/var/log/system.log"))
+    let actions_clone = actions.clone();
+    engine.register_fn("start-process-simple", move |name: String, command: String, args: Vec<String>| {
+        if let Ok(mut queue) = actions_clone.lock() {
+            queue.push(Action::StartProcessSimple { name, command, args });
         }
     });
 
@@ -669,6 +751,14 @@ fn register_primitives(
     engine.register_fn("process-send-string", move |name: String, text: String| {
         if let Ok(mut queue) = actions_clone.lock() {
             queue.push(Action::ProcessSendString { name, text });
+        }
+    });
+
+    // (kill-process name) - kill a running process
+    let actions_clone = actions.clone();
+    engine.register_fn("kill-process", move |name: String| {
+        if let Ok(mut queue) = actions_clone.lock() {
+            queue.push(Action::KillProcess { name });
         }
     });
 
@@ -687,6 +777,86 @@ fn register_primitives(
         state.read()
             .map(|s| s.process_names.clone())
             .unwrap_or_default()
+    });
+
+    // ===== Shell Command Primitives =====
+
+    // (shell-command-to-string cmd) - run command synchronously, return output as string
+    // Example: (shell-command-to-string "ls -la")
+    // Scheme decides what to do with the output (buffer, pipe to LLM, etc.)
+    engine.register_fn("shell-command-to-string", |cmd: String| -> String {
+        use std::process::Command;
+        Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .output()
+            .map(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                if stderr.is_empty() {
+                    stdout.to_string()
+                } else {
+                    format!("{}{}", stdout, stderr)
+                }
+            })
+            .unwrap_or_else(|e| format!("Error: {}", e))
+    });
+
+    // ===== Chat Primitives =====
+
+    // (ai-chat provider api-key model system-prompt prompt)
+    // provider: "anthropic", "openai", "ollama", "gemini", "deepseek", "groq", "xai"
+    // Example: (ai-chat "anthropic" "sk-..." "claude-sonnet-4-20250514" "You help." "Hello")
+    let actions_clone = actions.clone();
+    engine.register_fn("ai-chat", move |provider: String, api_key: String, model: String, system: String, prompt: String| {
+        if let Ok(mut queue) = actions_clone.lock() {
+            let system_opt = if system.is_empty() { None } else { Some(system) };
+            queue.push(Action::Chat {
+                provider,
+                api_key,
+                model,
+                system: system_opt,
+                messages: vec![("user".to_string(), prompt)],
+            });
+        }
+    });
+
+    // (ai-chat-messages provider api-key model system-prompt messages)
+    // For multi-turn conversations
+    let actions_clone = actions.clone();
+    engine.register_fn("ai-chat-messages", move |provider: String, api_key: String, model: String, system: String, messages: Vec<Vec<String>>| {
+        if let Ok(mut queue) = actions_clone.lock() {
+            let system_opt = if system.is_empty() { None } else { Some(system) };
+            let msgs: Vec<(String, String)> = messages.into_iter()
+                .filter_map(|pair| {
+                    if pair.len() >= 2 {
+                        Some((pair[0].clone(), pair[1].clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            queue.push(Action::Chat {
+                provider,
+                api_key,
+                model,
+                system: system_opt,
+                messages: msgs,
+            });
+        }
+    });
+
+    // minibuffer-activate! - tells Rust minibuffer is now active in generic mode
+    let actions_clone = actions.clone();
+    engine.register_fn("minibuffer-activate!", move |prompt: String| {
+        if let Ok(mut queue) = actions_clone.lock() {
+            queue.push(Action::MinibufferActivate { prompt });
+        }
+    });
+
+    // (getenv name) - get environment variable
+    engine.register_fn("getenv", |name: String| -> String {
+        std::env::var(&name).unwrap_or_default()
     });
 }
 

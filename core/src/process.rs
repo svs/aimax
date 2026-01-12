@@ -55,9 +55,17 @@ impl Process {
     }
 }
 
+/// Simple process (no PTY) - just tracks PID for killing
+pub struct SimpleProcess {
+    pub name: String,
+    pub pid: u32,
+    pub command: String,
+}
+
 /// Registry managing all processes
 pub struct ProcessRegistry {
     processes: HashMap<String, Process>,
+    simple_processes: HashMap<String, SimpleProcess>,
     next_id: usize,
     /// Channel to send messages to the main thread
     message_tx: Sender<ProcessMessage>,
@@ -67,6 +75,7 @@ impl ProcessRegistry {
     pub fn new(message_tx: Sender<ProcessMessage>) -> Self {
         ProcessRegistry {
             processes: HashMap::new(),
+            simple_processes: HashMap::new(),
             next_id: 0,
             message_tx,
         }
@@ -185,6 +194,90 @@ impl ProcessRegistry {
         Ok(name.to_string())
     }
 
+    /// Spawn a simple process (no PTY, just piped stdout)
+    /// Better for non-interactive commands like tail -f
+    pub fn spawn_simple(
+        &mut self,
+        name: &str,
+        command: &str,
+        args: &[String],
+    ) -> Result<String, String> {
+        use std::process::{Command, Stdio};
+        use std::io::BufRead;
+
+        let mut child = Command::new(command)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn: {}", e))?;
+
+        let stdout = child.stdout.take()
+            .ok_or("Failed to get stdout")?;
+
+        let name_clone = name.to_string();
+        let tx = self.message_tx.clone();
+
+        let pid = child.id();
+        let cmd = format!("{} {}", command, args.join(" "));
+
+        // Store process info
+        self.simple_processes.insert(name.to_string(), SimpleProcess {
+            name: name.to_string(),
+            pid,
+            command: cmd,
+        });
+
+        let name_for_cleanup = name.to_string();
+        let tx_cleanup = self.message_tx.clone();
+
+        // Reader thread - keeps child alive
+        thread::spawn(move || {
+            let mut child = child; // Keep child alive in this thread
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines() {
+                match line {
+                    Ok(text) => {
+                        let _ = tx.send(ProcessMessage::Output {
+                            name: name_clone.clone(),
+                            text: format!("{}\n", text),
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+            // Wait for child and get exit code
+            let exit_code = child.wait().ok().and_then(|s| s.code());
+            let _ = tx_cleanup.send(ProcessMessage::Exited {
+                name: name_for_cleanup,
+                exit_code,
+            });
+        });
+
+        Ok(name.to_string())
+    }
+
+    /// Kill a process by name
+    pub fn kill(&mut self, name: &str) -> Result<(), String> {
+        // Try PTY process first
+        if let Some(proc) = self.processes.get_mut(name) {
+            *proc.running.lock().unwrap() = false;
+            self.processes.remove(name);
+            return Ok(());
+        }
+
+        // Try simple process
+        if let Some(proc) = self.simple_processes.remove(name) {
+            // Use kill command to send SIGTERM
+            let _ = std::process::Command::new("kill")
+                .arg(proc.pid.to_string())
+                .output();
+            return Ok(());
+        }
+
+        Err(format!("Process '{}' not found", name))
+    }
+
     /// Send text to a process by name
     pub fn send(&mut self, name: &str, text: &str) -> Result<(), String> {
         let proc = self.processes
@@ -197,15 +290,22 @@ impl ProcessRegistry {
 
     /// Check if a process is running
     pub fn is_running(&self, name: &str) -> bool {
-        self.processes
-            .get(name)
-            .map(|p| p.is_running())
-            .unwrap_or(false)
+        self.processes.get(name).map(|p| p.is_running()).unwrap_or(false)
+            || self.simple_processes.contains_key(name)
     }
 
     /// Get list of all process names
     pub fn list(&self) -> Vec<String> {
-        self.processes.keys().cloned().collect()
+        self.processes.keys()
+            .chain(self.simple_processes.keys())
+            .cloned()
+            .collect()
+    }
+
+    /// Get process info (name, command, pid) for a simple process
+    pub fn get_info(&self, name: &str) -> Option<(String, u32)> {
+        self.simple_processes.get(name)
+            .map(|p| (p.command.clone(), p.pid))
     }
 
     /// Remove a dead process from the registry

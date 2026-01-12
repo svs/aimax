@@ -211,6 +211,7 @@ impl Keymap {
 
         // === M-x and help ===
         km.bind("M-x", "execute-extended-command");
+        km.bind("escape x", "execute-extended-command");  // Escape as Meta prefix
         km.bind("C-h k", "describe-key");
         km.bind("C-h f", "describe-function");
 
@@ -224,10 +225,13 @@ impl Keymap {
 
         // === Cancel ===
         km.bind("C-g", "keyboard-quit");
-        km.bind("escape", "keyboard-quit");
+        km.bind("escape escape", "keyboard-quit");  // Double-escape to quit
 
         // === Fallback for terminal issues ===
         km.bind("F2", "save-buffer");
+
+        // === AI ===
+        km.bind("C-x a", "ask-ai");
 
         km
     }

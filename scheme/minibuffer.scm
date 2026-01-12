@@ -16,15 +16,24 @@
 (define *completing-file* #f)
 (define *cwd* ".")
 
+;; Generic completion list (set before calling minibuffer-prompt)
+(define *minibuffer-completions* '())
+
 ;; Activate minibuffer with prompt
 (define (minibuffer-prompt prompt callback)
   (set! *minibuffer-active* #t)
   (set! *minibuffer-prompt* prompt)
   (set! *minibuffer-input* "")
   (set! *minibuffer-point* 0)
-  (set! *minibuffer-matches* '())
   (set! *minibuffer-selected* 0)
-  (set! *minibuffer-callback* callback))
+  (set! *minibuffer-callback* callback)
+  ;; Initialize matches from completions list
+  (set! *minibuffer-matches*
+        (if (null? *minibuffer-completions*)
+            '()
+            *minibuffer-completions*))
+  ;; Tell Rust to activate generic minibuffer mode
+  (minibuffer-activate! prompt))
 
 ;; Start file completion
 (define (minibuffer-find-file cwd callback)
@@ -36,7 +45,8 @@
 ;; Cancel minibuffer
 (define (minibuffer-cancel)
   (set! *minibuffer-active* #f)
-  (set! *completing-file* #f))
+  (set! *completing-file* #f)
+  (set! *minibuffer-completions* '()))
 
 ;; Complete with selected match
 (define (minibuffer-complete)
@@ -71,6 +81,12 @@
       (when callback
         (callback result)))))
 
+;; Filter completions by substring match
+(define (filter-completions input completions)
+  (if (string=? input "")
+      completions
+      (filter (lambda (s) (string-contains? s input)) completions)))
+
 ;; Insert character
 (define (minibuffer-insert char)
   (set! *minibuffer-input*
@@ -79,8 +95,13 @@
           (string char)
           (substring *minibuffer-input* *minibuffer-point*)))
   (set! *minibuffer-point* (+ *minibuffer-point* 1))
-  (when *completing-file*
-    (minibuffer-update-completions)))
+  (cond
+    (*completing-file*
+     (minibuffer-update-completions))
+    ((not (null? *minibuffer-completions*))
+     ;; Generic completion filtering
+     (set! *minibuffer-matches* (filter-completions *minibuffer-input* *minibuffer-completions*))
+     (set! *minibuffer-selected* 0))))
 
 ;; Delete backward
 (define (minibuffer-delete-backward)
@@ -90,8 +111,12 @@
             (substring *minibuffer-input* 0 (- *minibuffer-point* 1))
             (substring *minibuffer-input* *minibuffer-point*)))
     (set! *minibuffer-point* (- *minibuffer-point* 1))
-    (when *completing-file*
-      (minibuffer-update-completions))))
+    (cond
+      (*completing-file*
+       (minibuffer-update-completions))
+      ((not (null? *minibuffer-completions*))
+       (set! *minibuffer-matches* (filter-completions *minibuffer-input* *minibuffer-completions*))
+       (set! *minibuffer-selected* 0)))))
 
 ;; Navigation
 (define (minibuffer-next-completion)

@@ -4,9 +4,18 @@
 //! Uses ropey for efficient editing of large texts.
 
 use ropey::Rope;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
 use std::path::{Path, PathBuf};
+
+/// Buffer local variable value
+#[derive(Debug, Clone)]
+pub enum LocalVar {
+    String(String),
+    Int(i64),
+    Bool(bool),
+}
 
 /// A buffer: named container of text with a cursor position
 #[derive(Debug, Clone)]
@@ -21,6 +30,10 @@ pub struct Buffer {
     point: usize,
     /// Has buffer been modified since last save?
     modified: bool,
+    /// Major mode name
+    pub major_mode: String,
+    /// Buffer-local variables
+    pub locals: HashMap<String, LocalVar>,
 }
 
 impl Buffer {
@@ -32,6 +45,8 @@ impl Buffer {
             rope: Rope::new(),
             point: 0,
             modified: false,
+            major_mode: "fundamental".to_string(),
+            locals: HashMap::new(),
         }
     }
 
@@ -43,6 +58,29 @@ impl Buffer {
             rope: Rope::from_str(text),
             point: 0,
             modified: false,
+            major_mode: "fundamental".to_string(),
+            locals: HashMap::new(),
+        }
+    }
+
+    /// Set a buffer-local variable
+    pub fn set_local(&mut self, key: &str, value: LocalVar) {
+        self.locals.insert(key.to_string(), value);
+    }
+
+    /// Get a buffer-local string variable
+    pub fn get_local_string(&self, key: &str) -> Option<&str> {
+        match self.locals.get(key) {
+            Some(LocalVar::String(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Get a buffer-local int variable
+    pub fn get_local_int(&self, key: &str) -> Option<i64> {
+        match self.locals.get(key) {
+            Some(LocalVar::Int(n)) => Some(*n),
+            _ => None,
         }
     }
 
@@ -64,6 +102,8 @@ impl Buffer {
             rope,
             point: 0,
             modified: false,
+            major_mode: "fundamental".to_string(),
+            locals: HashMap::new(),
         })
     }
 

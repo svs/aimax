@@ -9,6 +9,7 @@ use std::io::Write;
 use std::sync::mpsc::{self, Receiver, Sender};
 use crate::{Buffer, Interpreter, command::CommandResult, scheme::Action};
 use crate::process::{ProcessRegistry, ProcessMessage, MAX_PROCESS_BUFFER_LINES};
+use crate::llm::{ChatConfig, Message, StreamEvent, chat_stream};
 
 /// Log errors to /tmp/aimax.log
 fn log_error(context: &str, error: &str) {
@@ -49,6 +50,13 @@ pub struct Editor {
     // Process system
     pub processes: ProcessRegistry,
     process_rx: Receiver<ProcessMessage>,
+
+    // Chat system
+    pub chat_config: ChatConfig,
+    pub chat_messages: Vec<Message>,
+    pub chat_streaming: bool,
+    chat_tx: Sender<StreamEvent>,
+    chat_rx: Receiver<StreamEvent>,
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -57,6 +65,8 @@ pub enum MinibufferMode {
     None,
     FindFile,
     SwitchBuffer,
+    /// Generic Scheme-controlled prompt (ask-ai, M-x, etc.)
+    Generic,
 }
 
 impl Editor {
@@ -64,6 +74,8 @@ impl Editor {
         let scheme = Interpreter::with_core();
         let (ipc_tx, ipc_rx) = mpsc::channel();
         let (process_tx, process_rx) = mpsc::channel();
+        let (chat_tx, chat_rx) = mpsc::channel();
+
         let mut editor = Editor {
             buffers: vec![Buffer::new("*scratch*")],
             current: 0,
@@ -82,6 +94,12 @@ impl Editor {
             face_actions: vec![],
             processes: ProcessRegistry::new(process_tx),
             process_rx,
+            // Chat config comes from Scheme when chat is invoked
+            chat_config: ChatConfig::default(),
+            chat_messages: vec![],
+            chat_streaming: false,
+            chat_tx,
+            chat_rx,
         };
 
         // Load user init file
@@ -127,17 +145,29 @@ impl Editor {
 
     /// Sync buffer state to Scheme globals (lightweight)
     fn sync_buffer_state(&mut self) {
-        // Sync buffer file paths (needed for desktop-save)
         if let Ok(mut state) = self.scheme.shared_state.write() {
+            // Sync buffer file paths (needed for desktop-save)
             state.buffer_file_paths = self.buffers.iter()
                 .filter_map(|b| b.file_path.as_ref())
                 .map(|p| p.to_string_lossy().to_string())
                 .collect();
             // Sync running process names
             state.process_names = self.processes.list();
+            // Sync current buffer info
+            let buf = &self.buffers[self.current];
+            state.buffer_name = buf.name.clone();
+            state.buffer_major_mode = buf.major_mode.clone();
+            // Sync buffer locals (stringify values)
+            state.buffer_locals.clear();
+            for (k, v) in &buf.locals {
+                let val = match v {
+                    crate::buffer::LocalVar::String(s) => s.clone(),
+                    crate::buffer::LocalVar::Int(n) => n.to_string(),
+                    crate::buffer::LocalVar::Bool(b) => b.to_string(),
+                };
+                state.buffer_locals.insert(k.clone(), val);
+            }
         }
-        // Note: We skip syncing Scheme globals here for performance.
-        // Scheme code should use primitives like (buffer-point) instead of *buffer-point*.
     }
 
     /// Run Scheme code, logging any errors
@@ -174,6 +204,16 @@ impl Editor {
             match action {
                 Action::Insert(text) => self.buffer().insert(&text),
                 Action::Delete => self.buffer().delete_backward(),
+                Action::CreateBuffer(name) => {
+                    // Create new buffer if it doesn't exist, switch to it
+                    if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+                        self.current = idx;
+                    } else {
+                        let buf = Buffer::new(&name);
+                        self.buffers.push(buf);
+                        self.current = self.buffers.len() - 1;
+                    }
+                }
                 Action::SwitchBuffer(name) => {
                     if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
                         self.current = idx;
@@ -224,6 +264,18 @@ impl Editor {
                         self.status_message = Some("No file path".to_string());
                     }
                 }
+                Action::KillBuffer => {
+                    if self.buffers.len() > 1 {
+                        let name = self.buffer_ref().name.clone();
+                        self.buffers.remove(self.current);
+                        if self.current >= self.buffers.len() {
+                            self.current = self.buffers.len() - 1;
+                        }
+                        self.status_message = Some(format!("Killed {}", name));
+                    } else {
+                        self.status_message = Some("Can't kill last buffer".to_string());
+                    }
+                }
                 Action::KeyboardQuit => {
                     self.minibuffer_cancel();
                     self.status_message = Some("Quit".to_string());
@@ -250,13 +302,104 @@ impl Editor {
                         }
                     }
                 }
+                Action::StartProcessSimple { name, command, args } => {
+                    let cmd_str = format!("{} {}", command, args.join(" "));
+                    match self.processes.spawn_simple(&name, &command, &args) {
+                        Ok(_) => {
+                            // Create or switch to process buffer
+                            let idx = if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+                                idx
+                            } else {
+                                let buf = Buffer::new(&name);
+                                self.buffers.push(buf);
+                                self.buffers.len() - 1
+                            };
+                            self.current = idx;
+
+                            // Set buffer locals
+                            let buf = &mut self.buffers[idx];
+                            buf.major_mode = "process".to_string();
+                            buf.set_local("process-name", crate::buffer::LocalVar::String(name.clone()));
+                            buf.set_local("process-command", crate::buffer::LocalVar::String(cmd_str));
+                            if let Some((_, pid)) = self.processes.get_info(&name) {
+                                buf.set_local("process-pid", crate::buffer::LocalVar::Int(pid as i64));
+                            }
+
+                            self.status_message = Some(format!("Started {}", name));
+                        }
+                        Err(e) => {
+                            self.status_message = Some(format!("Failed: {}", e));
+                        }
+                    }
+                }
                 Action::ProcessSendString { name, text } => {
                     if let Err(e) = self.processes.send(&name, &text) {
                         self.status_message = Some(format!("Failed to send: {}", e));
                     }
                 }
+                Action::KillProcess { name } => {
+                    match self.processes.kill(&name) {
+                        Ok(_) => self.status_message = Some(format!("Killed {}", name)),
+                        Err(e) => self.status_message = Some(e),
+                    }
+                }
+                Action::Chat { provider, api_key, model, system, messages } => {
+                    self.start_chat(&provider, &api_key, &model, system.as_deref(), messages);
+                }
+                Action::MinibufferActivate { prompt } => {
+                    // Scheme activated minibuffer in generic mode
+                    self.minibuffer_mode = MinibufferMode::Generic;
+                    self.minibuffer_active = true;
+                    self.minibuffer_prompt = prompt;
+                    self.minibuffer_input = String::new();
+                    self.minibuffer_matches = vec![];
+                    self.minibuffer_selected = 0;
+                }
             }
         }
+    }
+
+    /// Start a chat with an LLM provider
+    fn start_chat(&mut self, provider: &str, api_key: &str, model: &str, system: Option<&str>, messages: Vec<(String, String)>) {
+        if api_key.is_empty() {
+            self.status_message = Some("No API key set. Set *ai-api-key* in init.scm".to_string());
+            return;
+        }
+
+        // Create or find *chat* buffer
+        let chat_buf_idx = self.buffers.iter()
+            .position(|b| b.name == "*chat*")
+            .unwrap_or_else(|| {
+                let buf = Buffer::new("*chat*");
+                self.buffers.push(buf);
+                self.buffers.len() - 1
+            });
+
+        // Append user message to buffer
+        if let Some((_, content)) = messages.last() {
+            self.buffers[chat_buf_idx].append(&format!("\n>>> {}\n\n", content));
+        }
+
+        // Switch to chat buffer
+        self.current = chat_buf_idx;
+
+        // Build config
+        let config = ChatConfig {
+            provider: crate::llm::Provider::from_str(provider),
+            api_key: api_key.to_string(),
+            model: model.to_string(),
+            system: system.map(|s| s.to_string()),
+            max_tokens: 4096,
+        };
+
+        // Build messages for API
+        let api_messages: Vec<Message> = messages.into_iter()
+            .map(|(role, content)| Message { role, content })
+            .collect();
+
+        // Start streaming
+        self.chat_streaming = true;
+        chat_stream(config, api_messages, self.chat_tx.clone());
     }
 
     /// Start find-file command
@@ -293,7 +436,7 @@ impl Editor {
             return;
         }
         match self.minibuffer_mode {
-            MinibufferMode::FindFile => {
+            MinibufferMode::FindFile | MinibufferMode::Generic => {
                 let _ = self.run_scheme("minibuffer_insert", &format!(r#"(minibuffer-insert #\{})"#, c));
                 self.sync_minibuffer_state();
             }
@@ -323,7 +466,7 @@ impl Editor {
             return;
         }
         match self.minibuffer_mode {
-            MinibufferMode::FindFile => {
+            MinibufferMode::FindFile | MinibufferMode::Generic => {
                 let _ = self.run_scheme("minibuffer_delete_backward", "(minibuffer-delete-backward)");
                 self.sync_minibuffer_state();
             }
@@ -350,7 +493,7 @@ impl Editor {
             return;
         }
         match self.minibuffer_mode {
-            MinibufferMode::FindFile => {
+            MinibufferMode::FindFile | MinibufferMode::Generic => {
                 let _ = self.run_scheme("minibuffer_next", "(minibuffer-next-completion)");
                 self.sync_minibuffer_state();
             }
@@ -369,7 +512,7 @@ impl Editor {
             return;
         }
         match self.minibuffer_mode {
-            MinibufferMode::FindFile => {
+            MinibufferMode::FindFile | MinibufferMode::Generic => {
                 let _ = self.run_scheme("minibuffer_prev", "(minibuffer-prev-completion)");
                 self.sync_minibuffer_state();
             }
@@ -399,11 +542,29 @@ impl Editor {
         match self.minibuffer_mode {
             MinibufferMode::FindFile => self.submit_find_file(),
             MinibufferMode::SwitchBuffer => self.submit_switch_buffer(),
+            MinibufferMode::Generic => self.submit_generic(),
             MinibufferMode::None => {
                 self.minibuffer_cancel();
                 Ok(())
             }
         }
+    }
+
+    /// Submit generic minibuffer - calls Scheme callback
+    fn submit_generic(&mut self) -> Result<(), String> {
+        // Call Scheme's minibuffer-submit which invokes the callback
+        let result = self.run_scheme("minibuffer_submit", "(minibuffer-submit)");
+
+        // Process any actions (callback might open new minibuffer)
+        self.process_actions();
+
+        // Only reset if callback didn't open a new minibuffer
+        if !self.minibuffer_active {
+            self.minibuffer_mode = MinibufferMode::None;
+        }
+
+        self.sync_minibuffer_state();
+        result.map(|_| ())
     }
 
     fn submit_find_file(&mut self) -> Result<(), String> {
@@ -484,6 +645,7 @@ impl Editor {
         let mut processed = false;
         while let Ok(code) = self.ipc_rx.try_recv() {
             processed = true;
+
             // If it's a simple command string, execute it
             if !code.starts_with('(') {
                 let _ = self.execute_command(&code);
@@ -491,7 +653,12 @@ impl Editor {
             }
 
             // Otherwise run as scheme
-            let _ = self.run_scheme("ipc", &code);
+            if let Err(e) = self.run_scheme("ipc", &code) {
+                log_error("ipc", &format!("Scheme error: {}", e));
+            }
+
+            // Process any actions queued by Scheme
+            self.process_actions();
         }
         processed
     }
@@ -537,6 +704,41 @@ impl Editor {
                     // Remove from registry
                     self.processes.remove(&name);
                     self.status_message = Some(format!("Process {} exited", name));
+                }
+            }
+        }
+
+        processed
+    }
+
+    /// Process chat stream events (Claude responses)
+    /// Returns true if any events were processed
+    pub fn process_chat(&mut self) -> bool {
+        let mut processed = false;
+
+        while let Ok(event) = self.chat_rx.try_recv() {
+            processed = true;
+            match event {
+                StreamEvent::Text(text) => {
+                    // Find *chat* buffer and append
+                    if let Some(buf_idx) = self.buffers.iter().position(|b| b.name == "*chat*") {
+                        self.buffers[buf_idx].append(&text);
+                    }
+                }
+                StreamEvent::Done => {
+                    // Append newlines for separation
+                    if let Some(buf_idx) = self.buffers.iter().position(|b| b.name == "*chat*") {
+                        self.buffers[buf_idx].append("\n\n");
+                    }
+                    self.chat_streaming = false;
+                }
+                StreamEvent::Error(err) => {
+                    self.chat_streaming = false;
+                    self.status_message = Some(format!("Chat error: {}", err));
+                    // Also append error to chat buffer
+                    if let Some(buf_idx) = self.buffers.iter().position(|b| b.name == "*chat*") {
+                        self.buffers[buf_idx].append(&format!("\n[Error: {}]\n", err));
+                    }
                 }
             }
         }

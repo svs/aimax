@@ -18,7 +18,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{List, ListItem, Paragraph},
+    widgets::{List, ListItem, Paragraph, Wrap},
     Terminal,
 };
 
@@ -117,6 +117,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
             tui.needs_redraw = true;
         }
 
+        // Handle chat stream (Claude responses)
+        if tui.editor.process_chat() {
+            tui.needs_redraw = true;
+        }
+
         // Apply any pending face changes
         for (face, key, value) in tui.editor.face_actions.drain(..) {
             if let Err(e) = tui.syntax.faces.set_attribute(&face, &key, &value) {
@@ -136,6 +141,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
             let cursor_col = tui.editor.buffer_ref().current_column();
             let modified = tui.editor.buffer_ref().is_modified();
             let status_msg = tui.editor.status_message.clone();
+            let chat_streaming = tui.editor.chat_streaming;
 
             // Minibuffer state
             let mb_active = tui.editor.minibuffer_active;
@@ -175,12 +181,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
 
                 // Status line
                 let mod_indicator = if modified { "[+] " } else { "" };
-                let status = format!(" {}{} L{}:C{} {}",
+                let ai_indicator = if chat_streaming { " [AI streaming...]" } else { "" };
+                let status = format!(" {}{} L{}:C{}{}{}",
                     mod_indicator,
                     buffer_name,
                     cursor_line,
                     cursor_col,
-                    status_msg.as_deref().unwrap_or("")
+                    ai_indicator,
+                    status_msg.as_deref().map(|s| format!(" {}", s)).unwrap_or_default()
                 );
                 let status_widget = Paragraph::new(status)
                     .style(Style::default().bg(Color::DarkGray).fg(Color::White));
@@ -269,7 +277,8 @@ fn render_buffer(
         lines.push(Line::from(spans));
     }
 
-    let buffer_widget = Paragraph::new(lines);
+    let buffer_widget = Paragraph::new(lines)
+        .wrap(Wrap { trim: false });
     f.render_widget(buffer_widget, area);
 
     // Position cursor (adjusted for scroll)
@@ -337,10 +346,16 @@ fn handle_minibuffer_key(tui: &mut Tui, key: &KeyEvent) {
         KeyCode::Tab => {
             tui.editor.minibuffer_complete();
         }
-        KeyCode::Down | KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Down => {
             tui.editor.minibuffer_next();
         }
-        KeyCode::Up | KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Up => {
+            tui.editor.minibuffer_prev();
+        }
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            tui.editor.minibuffer_next();
+        }
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             tui.editor.minibuffer_prev();
         }
         KeyCode::Backspace => {
@@ -438,7 +453,9 @@ fn handle_buffer_key(tui: &mut Tui, key: &KeyEvent) {
 
 fn key_from_event(event: &KeyEvent) -> Option<Key> {
     let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = event.modifiers.contains(KeyModifiers::ALT);
+    // Use Alt or Cmd (Super) for Meta
+    let alt = event.modifiers.contains(KeyModifiers::ALT)
+           || event.modifiers.contains(KeyModifiers::SUPER);
 
     let code = match event.code {
         KeyCode::Char(c) => c.to_string(),
@@ -455,6 +472,7 @@ fn key_from_event(event: &KeyEvent) -> Option<Key> {
         KeyCode::PageUp => "prior".to_string(),
         KeyCode::PageDown => "next".to_string(),
         KeyCode::Esc => "escape".to_string(),
+        KeyCode::F(n) => format!("F{}", n),
         _ => return None,
     };
 
