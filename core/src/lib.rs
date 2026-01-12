@@ -19,6 +19,7 @@ pub mod process;
 pub mod scheme;
 pub mod syntax;
 pub mod ipc;
+pub mod tools;
 
 pub use buffer::Buffer;
 pub use command::{CommandRegistry, CommandResult, Context};
@@ -30,4 +31,5 @@ pub use minibuffer::{Minibuffer, path as minibuffer_path};
 pub use syntax::{Lang, SyntaxHighlighter, HighlightSpan, highlight_color};
 pub use scheme::Interpreter;
 pub use process::{ProcessRegistry, ProcessMessage, MAX_PROCESS_BUFFER_LINES};
-pub use llm::{ChatConfig, Message, StreamEvent, chat_stream};
+pub use llm::{ChatConfig, Message, StreamEvent, Tool, ToolParam, chat_stream};
+pub use tools::{ToolRegistry, ToolResult};
