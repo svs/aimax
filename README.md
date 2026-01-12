@@ -1,116 +1,175 @@
 # aimax
 
-**A programmable workspace for humans and AI agents.**
+**Emacs for the AI age.**
+
+A programmable editor where AI agents are first-class citizens. Scheme-scriptable. Rust-powered. No Electron. No cloud. Just you, your buffers, and your agents.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                        SCHEME                           │
-│                       (the brain)                       │
-│                                                         │
-│   agents · orchestration · context · customization     │
-└───────────────────────────┬─────────────────────────────┘
-                            │
-┌───────────────────────────┴─────────────────────────────┐
-│                         RUST                            │
-│                      (the muscle)                       │
-│                                                         │
-│   http · streaming · browser · processes · rendering   │
-└─────────────────────────────────────────────────────────┘
+ C-x C-f  find-file          M-x ask-ai  "refactor this function"
+ C-x b    switch-buffer      M-x shell   run commands, stream output
+ C-x C-s  save               M-x agent   launch an autonomous agent
 ```
 
-## What is this?
+## Why?
 
-Not a text editor. A **work OS** where AI agents are first-class citizens.
+Every "AI coding tool" is a chatbot bolted onto an editor. You paste code in, get code out, paste it back. That's not integration. That's a workaround.
 
-You don't type code. You:
-- **Curate context** — what does the agent see?
-- **Describe intent** — what do you want?
-- **Review changes** — accept or reject
-- **Orchestrate** — agents working together
+Aimax starts from scratch: **what if buffers and agents were designed together?**
 
-## The idea
+- Agents read buffers, write buffers, watch buffers
+- You see what they see, approve what they do
+- Everything is scriptable in Scheme
+- Everything runs locally, streams fast
+
+## Demo
 
 ```scheme
-;; Define an agent
-(define-agent sourcer
-  :system "You find candidates for {role}."
-  :tools (web-search linkedin-scrape)
-  :context (buffer-text "job-spec"))
+;; Ask AI about the current buffer
+(define (ask-ai)
+  (minibuffer-prompt "Ask AI: "
+    (lambda (prompt)
+      (chat "anthropic" *ai-api-key* "claude-sonnet-4-20250514"
+        `(("user" ,(string-append prompt "\n\n" (buffer-text))))))))
 
-;; Run a pipeline
-(-> (parallel sourcer-linkedin sourcer-github)
-    (merge)
-    screener
-    (human-gate)
-    outreach)
+;; Stream shell output to a buffer (tail -f, builds, etc.)
+(define (tail-logs)
+  (buffer-create "*logs*")
+  (start-process-simple "*logs*" "tail" '("-f" "/var/log/system.log")))
+
+;; Kill the process when done
+(define (kill-logs)
+  (kill-process "*logs*"))
 ```
 
-No YAML. No frameworks. Just Scheme.
+## What works today
+
+- **Full Emacs-style editing** — ropey-backed buffers, keymaps, minibuffer with completion
+- **M-x command system** — extensible command registry with fuzzy completion
+- **Process buffers** — PTY-based shells, streaming command output
+- **AI chat** — streaming responses from Claude/OpenAI/Ollama
+- **Scheme scripting** — Steel Scheme with full access to editor primitives
+- **IPC socket** — control from external scripts (`echo '(message "hi")' | nc -U /tmp/aimax.sock`)
+- **Tree-sitter syntax highlighting** — fast, accurate, extensible
 
 ## Architecture
 
+```
+┌─────────────────────────────────────────────────────────┐
+│                      SCHEME (Steel)                     │
+│                                                         │
+│   commands · keymaps · agents · hooks · init.scm       │
+└───────────────────────────┬─────────────────────────────┘
+                            │ actions
+┌───────────────────────────┴─────────────────────────────┐
+│                      RUST (core)                        │
+│                                                         │
+│   buffers (ropey) · processes (pty) · llm (streaming)  │
+│   tree-sitter · ipc · rendering                         │
+└─────────────────────────────────────────────────────────┘
+```
+
 **Scheme says what. Rust does how.**
 
-Scheme handles:
-- Agent definitions
-- Orchestration logic
-- Context gathering
-- User customization
+The pattern: Scheme pushes `Action`s to a queue. Rust processes them. No callbacks, no async in Scheme, no complexity.
 
-Rust handles:
-- Async HTTP + streaming
-- Parallel agent execution
-- Browser automation
-- Terminal rendering
-
-Scheme never blocks. Scheme never waits.
-
-## App packages
-
-Bundle agents, buffers, and workflows for different domains:
-
-```
-recruiting/     → source, screen, outreach
-sidegig/        → clients, invoices, projects
-personal/       → journal, habits, finance
+```rust
+enum Action {
+    Insert(String),
+    SwitchBuffer(String),
+    StartProcess { name: String, command: String, args: Vec<String> },
+    Chat { provider: String, model: String, messages: Vec<Message> },
+    // ...
+}
 ```
 
-Each package defines buffer types (not just text), views (cards, tables, dashboards), and domain-specific AI agents.
+## Getting started
+
+```bash
+git clone https://github.com/anthropics/aimax
+cd aimax
+cargo run --release
+```
+
+Create `~/.aimax/init.scm`:
+
+```scheme
+;; Your API key
+(define *ai-api-key* "sk-ant-...")
+
+;; Custom keybinding
+(global-set-key "C-c a" 'ask-ai)
+
+;; Hook that runs on save
+(set! *after-save* (lambda () (message "Saved!")))
+```
+
+Talk to it from the terminal:
+
+```bash
+echo '(message "hello from outside")' | nc -U /tmp/aimax.sock
+echo '(find-file "/tmp/test.txt")' | nc -U /tmp/aimax.sock
+```
+
+## Keybindings
+
+| Key | Command |
+|-----|---------|
+| `C-x C-f` | Find file |
+| `C-x C-s` | Save buffer |
+| `C-x b` | Switch buffer |
+| `C-x k` | Kill buffer |
+| `C-g` | Keyboard quit |
+| `M-x` | Execute command |
+| `C-f/b/n/p` | Forward/back char, next/prev line |
+| `C-a/e` | Beginning/end of line |
+| `M-f/b` | Forward/back word |
+
+## The vision
+
+Today: a fast, scriptable editor with AI chat.
+
+Tomorrow: **a work OS where AI agents are first-class**.
+
+```scheme
+;; Define an agent
+(define-agent code-reviewer
+  :system "Review code for bugs, security issues, and style."
+  :context (buffer-text)
+  :tools (read-file write-file run-tests))
+
+;; Orchestrate agents
+(-> (get-diff "main")
+    code-reviewer
+    (human-gate)        ; you approve
+    (apply-suggestions))
+```
+
+The Emacs insight: everything is a buffer, everything is programmable.
+
+The new insight: **AI agents are just another thing that operates on buffers**.
 
 ## Status
 
 Early. Building in public.
 
-- [x] Buffer system (ropey)
-- [x] Scheme scripting (Steel)
-- [x] IPC socket
-- [x] Process buffers (PTY)
-- [x] Syntax highlighting (tree-sitter)
-- [ ] HTTP streaming
+- [x] Ropey buffers with full cursor movement
+- [x] Steel Scheme scripting
+- [x] Emacs-style keymaps (C-x prefix, M-x)
+- [x] Minibuffer with fuzzy completion
+- [x] Process buffers (PTY + simple streaming)
+- [x] AI chat with streaming
+- [x] Tree-sitter syntax highlighting
+- [x] IPC socket control
+- [ ] Multiple windows (C-x 2, C-x 3)
+- [ ] LSP client
 - [ ] Agent DSL
-- [ ] Orchestration primitives
-- [ ] Browser integration
-
-## Running
-
-```bash
-cd tui && cargo run
-```
-
-Talk to it via socket:
-```bash
-echo '(message "hello")' | nc -U /tmp/aimax.sock
-```
+- [ ] Native Mac GUI
 
 ## Philosophy
 
-The Emacs insight: everything is a buffer, everything is programmable.
+No Electron. No web tech. No "runs in the cloud."
 
-The new insight: AI agents are just another thing that operates on buffers.
-
-The browser is a buffer. The terminal is a buffer. The candidate pipeline is a buffer. The AI agent reads buffers, writes buffers, transforms buffers.
-
-You orchestrate. The agents execute.
+Just Rust for speed, Scheme for soul, and a deep belief that the best tools are the ones you can take apart and rebuild.
 
 ## License
 
@@ -118,5 +177,4 @@ MIT
 
 ---
 
-*The goal is not to build an editor.*
-*The goal is to build the environment where you and your AI agents get work done.*
+*Built by humans, for humans who work with AI.*
