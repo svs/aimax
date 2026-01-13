@@ -206,7 +206,8 @@ impl Editor {
             state.buffer_major_mode = self.buffer_ref().major_mode.clone();
             state.buffer_modified = self.buffer_ref().is_modified();
             state.buffer_tree = self.buffer_ref().tree.clone().map(std::sync::Arc::new);
-            
+            state.buffer_point = self.buffer_ref().point();
+
             // Sync running process names
             state.process_names = self.processes.list();
         }

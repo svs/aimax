@@ -264,6 +264,7 @@ async fn stream_with_tools(
 
     // Track tool use accumulation (input arrives in chunks)
     let mut current_tool: Option<(String, String, String)> = None; // (id, name, json_buffer)
+    let mut done_sent = false;
 
     while let Some(chunk_result) = stream.next().await {
         match chunk_result {
@@ -296,6 +297,7 @@ async fn stream_with_tools(
                         let _ = tx.send(StreamEvent::ToolUse { id, name, input });
                     }
                     let _ = tx.send(StreamEvent::Done);
+                    done_sent = true;
                 }
             },
             Err(e) => {
@@ -305,7 +307,9 @@ async fn stream_with_tools(
     }
 
     // Ensure Done is sent if stream ends without explicit Done chunk
-    let _ = tx.send(StreamEvent::Done);
+    if !done_sent {
+        let _ = tx.send(StreamEvent::Done);
+    }
     Ok(())
 }
 

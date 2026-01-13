@@ -116,14 +116,25 @@
 
 ;; Interactive commands
 
-;; Start a new chat - prompts for input, clears history
+;; Open the chat buffer
+;; Creates *chat* if it doesn't exist, switches to it, positions cursor
+(define (open-chat-buffer)
+  ;; Create buffer if needed (buffer-create is idempotent-ish for existing buffers)
+  (buffer-create "*chat*")
+  (buffer-switch "*chat*")
+  ;; If buffer is empty, add initial prompt
+  (when (= (string-length (buffer-text)) 0)
+    (buffer-insert ">>> "))
+  (end-of-buffer))
+
+;; Start a new chat - clears history and opens chat buffer
 (define (ask-ai)
   (chat-clear)
-  (minibuffer-prompt "Ask AI: " chat-send))
+  (open-chat-buffer))
 
-;; Continue conversation - prompts for input, keeps history
+;; Continue conversation - opens chat buffer, keeps history
 (define (ask-ai-continue)
-  (minibuffer-prompt "Continue: " chat-send))
+  (open-chat-buffer))
 
 ;; Send from buffer - grab text after last >>> and send
 ;; Bound to C-c C-c in chat buffers

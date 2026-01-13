@@ -197,9 +197,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
             tui.needs_redraw = true;
         }
 
-        // Animate spinner while streaming
-        if tui.editor.chat_streaming {
-            tui.frame = tui.frame.wrapping_add(1);
+        // Animate spinner and cursor blink
+        tui.frame = tui.frame.wrapping_add(1);
+        // Redraw for cursor blink (every 10 frames) or while streaming
+        if tui.frame % 10 == 0 || tui.editor.chat_streaming {
             tui.needs_redraw = true;
         }
 
@@ -265,8 +266,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
                 let end_line = scroll_offset + height;
                 let line_highlights = tui.syntax.highlights_for_lines(lang, &text, start_line, end_line);
 
+                // Cursor blinks every ~500ms (10 frames at 50ms polling)
+                let cursor_visible = (tui.frame / 10) % 2 == 0;
+
                 // Render buffer with syntax highlighting
-                render_buffer(f, chunks[0], &text, &line_highlights, cursor_line, cursor_col, scroll_offset);
+                render_buffer(f, chunks[0], &text, &line_highlights, cursor_line, cursor_col, scroll_offset, cursor_visible);
 
                 // Status line
                 let mod_indicator = if modified { "[+] " } else { "" };
@@ -335,6 +339,7 @@ fn render_buffer(
     cursor_line: usize,
     cursor_col: usize,
     scroll_offset: usize,
+    cursor_visible: bool,
 ) {
     let height = area.height as usize;
     let mut lines: Vec<Line> = Vec::new();
@@ -385,13 +390,15 @@ fn render_buffer(
         .wrap(Wrap { trim: false });
     f.render_widget(buffer_widget, area);
 
-    // Position cursor (adjusted for scroll)
-    let cursor_screen_line = cursor_line.saturating_sub(scroll_offset);
-    if cursor_screen_line > 0 && cursor_screen_line <= height {
-        f.set_cursor(
-            area.x + cursor_col as u16,
-            area.y + (cursor_screen_line - 1) as u16
-        );
+    // Position cursor (adjusted for scroll) with blink
+    if cursor_visible {
+        let cursor_screen_line = cursor_line.saturating_sub(scroll_offset);
+        if cursor_screen_line > 0 && cursor_screen_line <= height {
+            f.set_cursor(
+                area.x + cursor_col as u16,
+                area.y + (cursor_screen_line - 1) as u16
+            );
+        }
     }
 }
 

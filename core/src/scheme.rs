@@ -99,6 +99,7 @@ pub struct SharedState {
     pub process_names: Vec<String>,       // Names of running processes
     pub buffer_major_mode: String,         // Current buffer's major mode
     pub buffer_name: String,               // Current buffer name
+    pub buffer_point: usize,               // Cursor position in current buffer
     pub buffer_locals: std::collections::HashMap<String, String>,  // Buffer local vars (stringified)
     pub buffer_tree: Option<std::sync::Arc<tree_sitter::Tree>>, // Current buffer's syntax tree
 }
@@ -544,6 +545,12 @@ fn register_primitives(
     let state = shared_state.clone();
     engine.register_fn("buffer-name", move || -> String {
         state.read().map(|s| s.buffer_name.clone()).unwrap_or_default()
+    });
+
+    // (buffer-point) - cursor position in current buffer
+    let state = shared_state.clone();
+    engine.register_fn("buffer-point", move || -> isize {
+        state.read().map(|s| s.buffer_point as isize).unwrap_or(0)
     });
 
     // (buffer-names) - all buffer names
