@@ -32,9 +32,6 @@
   "end-of-buffer"
   "view-log"
   "refresh-log"
-  "log-stream"
-  "log-stream-errors"
-  "log-stream-stop"
 ))
 
 ;; === Commands ===
@@ -142,19 +139,16 @@
 
 ;; === view-log - observe aimax logs ===
 
+;; View log with tail -f (live streaming)
 (define (view-log)
   (buffer-create "*log*")
-  (buffer-insert (read-file "/tmp/aimax.log")))
+  (buffer-switch "*log*")
+  (start-process-simple "*log*" "tail" '("-f" "/tmp/aimax.log"))
+  (message "Streaming log. C-c to stop."))
 
-;; Refresh log buffer
+;; Refresh just re-runs tail -f
 (define (refresh-log)
-  (when (string=? (buffer-name) "*log*")
-    (let ((content (read-file "/tmp/aimax.log")))
-      (beginning-of-buffer)
-      ;; Clear and reload - crude but works
-      (buffer-create "*log*")
-      (buffer-insert content)
-      (end-of-buffer))))
+  (view-log))
 
 ;; === kill-process command ===
 

@@ -137,8 +137,9 @@
 
 ;; === Commands ===
 
-;; View all logs in buffer
-(define (view-log)
+;; View all logs in buffer (parsed/formatted - may fail if log has non-sexp lines)
+;; Use view-log from commands.scm for raw tail -f streaming
+(define (view-log-formatted)
   (buffer-create "*log*")
   (let ((entries (log-read-all)))
     (for-each

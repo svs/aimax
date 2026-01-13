@@ -4,9 +4,7 @@
 
 use std::env;
 use std::io;
-use std::io::Write;
 use std::path::PathBuf;
-use std::fs::OpenOptions;
 
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -27,16 +25,6 @@ use aimax_core::{
     Lang, SyntaxHighlighter,
 };
 
-/// Log to /tmp/aimax.log
-fn log(msg: &str) {
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/aimax.log")
-    {
-        let _ = writeln!(file, "{}", msg);
-    }
-}
 
 /// Spinner frames for AI thinking indicator
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -217,7 +205,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
         // Apply any pending face changes
         for (face, key, value) in tui.editor.face_actions.drain(..) {
             if let Err(e) = tui.syntax.faces.set_attribute(&face, &key, &value) {
-                log(&format!("Face error: {}", e));
+                aimax_core::log_error!("tui", "face-error", "error" => &e.to_string());
             }
             tui.needs_redraw = true;
         }
@@ -498,7 +486,7 @@ fn render_minibuffer(
 }
 
 fn handle_minibuffer_key(tui: &mut Tui, key: &KeyEvent) {
-    log(&format!("Minibuffer key: {:?}", key.code));
+    aimax_core::log_debug!("tui", "minibuffer-key", "key" => &format!("{:?}", key.code));
     match key.code {
         KeyCode::Enter => {
             let _ = tui.editor.minibuffer_submit();
