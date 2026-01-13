@@ -1,64 +1,68 @@
-# Aimax
+# The Aimax Manifesto
 
-**Emacs, the good parts.**
+> "The editor is not just a tool for writing code. It is the environment in which we think."
 
-A programmable editor for the AI age. Scheme-scriptable, tree-sitter powered, LSP-enabled. Native on Mac, TUI everywhere.
+Emacs was a Lisp machine for text. It viewed the world as a stream of characters to be manipulated by functions. It was brilliant, but it was built for a world where "editing" meant typing.
 
-## Architecture
+Today, we don't just type. We **observe, transform, and orchestrate**. We manage clouds, debug distributed systems, wrangle data, and guide AI agents.
 
-- **Core** (Rust): ropey + tree-sitter + LSP. Battle-tested libraries, not reinvented wheels.
-- **Scripting** (Steel Scheme): Commands, keymaps, hooks, agents.
-- **TUI** (ratatui): Universal baseline. Works over SSH.
-- **Mac GUI** (Swift): Luxurious native experience with embedded browser.
+The "modern" editors (VS Code, Zed) are faster, but they locked the door. They gave us "Extensions" instead of "Core Access." They treat us as Users, not Architects.
 
-## Principles
+**Aimax is the return of the Architect's Editor.**
 
-1. Don't reinvent text editing. Use ropey, tree-sitter, LSP.
-2. Everything is a command. Keys map to commands. Scheme calls commands.
-3. Buffers are the universal abstraction. Text, terminal, browser - all buffers.
-4. Agents are Scheme programs that observe and act on buffers.
-5. Fast and native, not web-based (except the embedded browser).
+## The Grand Unified Theory of the Work OS
 
-## Current State
+Aimax is built on four axioms that define a new era of computing interface:
 
-- Core: ropey-based buffer with file I/O
-- Commands: Registry with built-in commands
-- Keymaps: Emacs-style key sequences (C-x C-f, etc.)
-- Minibuffer: Completing-read with fuzzy matching (nucleo)
-- TUI: Working editor with Vertico-style completion
+### 1. The Sensor is Structural (Tree-sitter)
+The editor must **understand** text, not just display it.
+- **Old Way:** Regex highlighting. Fragile, dumb, text-only.
+- **Aimax Way:** The buffer is a **Concrete Syntax Tree**.
+    - Markdown isn't text; it's a hierarchy of Sections, Tasks, and Blocks.
+    - Code isn't lines; it's Functions, Calls, and Definitions.
+    - Logs aren't streams; they are Events, Errors, and Timestamps.
+- **The Payoff:** The editor provides **Zero-Leak Context** to AI agents. It doesn't send "the file." It sends "the function."
 
-## Skills
+### 2. The Logic is Recursive (Scheme)
+The brain of the editor must be live, malleable, and expressive.
+- **Old Way:** Compiled plugins or isolated JS extensions.
+- **Aimax Way:** **Scheme (Steel)** running in the core.
+    - **Observe:** Scheme watches the Tree-sitter AST.
+    - **Transform:** Scheme modifies the tree (code mods, refactors).
+    - **Query:** Scheme treats buffers as a distributed database (`select task from notes where status = 'pending'`).
 
-### /new-feature
+### 3. The Muscle is System-Level (Rust)
+The engine must be unbreakably fast and safe.
+- **Old Way:** Single-threaded C (Emacs) or heavy Electron (VS Code).
+- **Aimax Way:** **Rust**.
+    - **Async I/O:** 1,000 parallel file reads.
+    - **Green Threads:** Agents running in the background without freezing the UI.
+    - **Safety:** No segfaults when the scripting layer makes a mistake.
 
-When adding a new feature to Aimax, follow this checklist:
+### 4. The Display is Reactive (UI as a Function of State)
+Text is the storage format, but it shouldn't be the only visualization.
+- **Old Way:** Monospace grids.
+- **Aimax Way:** **Components embedded in Text**.
+    - A `[ ]` task in Markdown renders as a clickable Checkbox.
+    - A `![chart]` node renders as a graphical plot.
+    - A `[Deploy]` button in a note triggers a shell script.
+- The UI observes the AST and renders the most useful representation: Text, Widget, or Visualization.
 
-1. **How does Emacs do it?**
-   - Read `docs/emacs-architecture.md`
-   - Understand the Emacs abstraction (overlays? text properties? hooks?)
-   - Document the Emacs approach in the feature design
+## The Workflow: Observe, Transform, Act
 
-2. **Can we do the same?**
-   - Match the Emacs API where it makes sense
-   - Keep Scheme interop in mind (will this be scriptable?)
-   - Don't deviate without good reason
+We stop "editing files" and start "running workflows."
 
-3. **Is there something that already does this in Rust?**
-   - Check crates.io for battle-tested implementations
-   - Examples: ropey (text), tree-sitter (parsing), nucleo (fuzzy), tower-lsp (LSP)
-   - Prefer existing libraries over reinventing
+1.  **Observe:** You open a log file. Tree-sitter parses it instantly. The UI renders "Error" nodes as expandable red widgets.
+2.  **Transform:** You ask the AI: "Group these by error type." The AI doesn't grep; it queries the AST and generates a new "Report" buffer.
+3.  **Act:** You review the Report. You click a "Fix" button generated next to a recurring error.
+4.  **Orchestrate:** Scheme triggers a background shell script to patch the server and deploy.
 
-4. **Implementation**
-   - Core feature goes in `core/src/`
-   - TUI rendering goes in `tui/src/`
-   - Export from `core/src/lib.rs`
-   - Add tests
+## The Promise
 
-## Next
+Aimax is not "Emacs with AI." It is a **Text-Based Operating System**.
 
-- Tree-sitter syntax highlighting in TUI
-- Multiple buffers (C-x b)
-- Windows (C-x 2, C-x 3)
-- LSP client (tower-lsp)
-- Steel Scheme scripting
-- Mac native GUI
+- **No Proprietary Formats:** Your data lives in Markdown, JSON, and Source Code.
+- **No API Walls:** If it's in a buffer, you can query it. If it's a process, you can pipe it.
+- **No Ceiling:** You start by typing. You end by building a custom IDE for your specific life.
+
+**Welcome to the successor.**

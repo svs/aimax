@@ -13,8 +13,12 @@
       "type": "SEQ",
       "members": [
         {
-          "type": "SYMBOL",
-          "name": "timestamp"
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "STRING",
+          "value": "log"
         },
         {
           "type": "SYMBOL",
@@ -29,21 +33,18 @@
           "name": "event"
         },
         {
-          "type": "REPEAT",
-          "content": {
-            "type": "SYMBOL",
-            "name": "field"
-          }
+          "type": "SYMBOL",
+          "name": "timestamp"
         },
         {
-          "type": "PATTERN",
-          "value": "\\n"
+          "type": "SYMBOL",
+          "name": "fields"
+        },
+        {
+          "type": "STRING",
+          "value": ")"
         }
       ]
-    },
-    "timestamp": {
-      "type": "PATTERN",
-      "value": "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"
     },
     "level": {
       "type": "CHOICE",
@@ -74,26 +75,58 @@
       "type": "PATTERN",
       "value": "[a-z_-]+"
     },
+    "timestamp": {
+      "type": "PATTERN",
+      "value": "\"[^\"]*\""
+    },
+    "fields": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SYMBOL",
+            "name": "field"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
+    },
     "field": {
       "type": "SEQ",
       "members": [
+        {
+          "type": "STRING",
+          "value": "("
+        },
         {
           "type": "SYMBOL",
           "name": "key"
         },
         {
           "type": "STRING",
-          "value": "="
+          "value": "."
         },
         {
           "type": "SYMBOL",
           "name": "value"
+        },
+        {
+          "type": "STRING",
+          "value": ")"
         }
       ]
     },
     "key": {
       "type": "PATTERN",
-      "value": "[a-z_]+"
+      "value": "[a-z_-]+"
     },
     "value": {
       "type": "CHOICE",
@@ -108,21 +141,21 @@
         },
         {
           "type": "SYMBOL",
-          "name": "identifier"
+          "name": "symbol"
         }
       ]
     },
     "string": {
       "type": "PATTERN",
-      "value": "\"[^\"]*\""
+      "value": "\"([^\"\\\\]|\\\\.)*\""
     },
     "number": {
       "type": "PATTERN",
       "value": "\\d+"
     },
-    "identifier": {
+    "symbol": {
       "type": "PATTERN",
-      "value": "[A-Za-z_][A-Za-z0-9_.-]*"
+      "value": "[a-zA-Z_][a-zA-Z0-9_-]*"
     }
   },
   "extras": [

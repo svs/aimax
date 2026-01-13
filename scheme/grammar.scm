@@ -210,14 +210,13 @@
           ;; Return path
           lib-path))))
 
-;; === Example: Log grammar ===
+;; === Log grammar (s-expression format) ===
+;; Format: (log LEVEL MODULE EVENT "TIMESTAMP" ((key . "value") ...))
 
 (define-grammar log
   (source_file (repeat entry))
 
-  (entry (seq timestamp level module event fields))
-
-  (timestamp (pattern "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"))
+  (entry (seq "(" "log" level module event timestamp fields ")"))
 
   (level (choice "debug" "info" "warn" "error"))
 
@@ -225,16 +224,18 @@
 
   (event (pattern "[a-z_-]+"))
 
-  (fields (repeat field))
+  (timestamp (pattern "\"[^\"]*\""))
 
-  (field (seq key "=" value))
+  (fields (seq "(" (repeat field) ")"))
 
-  (key (pattern "[a-z_]+"))
+  (field (seq "(" key "." value ")"))
 
-  (value (choice string number identifier))
+  (key (pattern "[a-z_-]+"))
 
-  (string (pattern "\"[^\"]*\""))
+  (value (choice string number symbol))
+
+  (string (pattern "\"([^\"\\\\]|\\\\.)*\""))
 
   (number (pattern "\\d+"))
 
-  (identifier (pattern "[A-Za-z_][A-Za-z0-9_.-]*")))
+  (symbol (pattern "[a-zA-Z_][a-zA-Z0-9_-]*")))

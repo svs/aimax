@@ -12,7 +12,7 @@
           "named": true
         },
         {
-          "type": "field",
+          "type": "fields",
           "named": true
         },
         {
@@ -29,6 +29,11 @@
         }
       ]
     }
+  },
+  {
+    "type": "event",
+    "named": true,
+    "fields": {}
   },
   {
     "type": "field",
@@ -50,17 +55,27 @@
     }
   },
   {
+    "type": "fields",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "field",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "key",
     "named": true,
     "fields": {}
   },
   {
     "type": "level",
-    "named": true,
-    "fields": {}
-  },
-  {
-    "type": "module",
     "named": true,
     "fields": {}
   },
@@ -89,22 +104,30 @@
       "required": true,
       "types": [
         {
-          "type": "identifier",
-          "named": true
-        },
-        {
           "type": "number",
           "named": true
         },
         {
           "type": "string",
           "named": true
+        },
+        {
+          "type": "symbol",
+          "named": true
         }
       ]
     }
   },
   {
-    "type": "=",
+    "type": "(",
+    "named": false
+  },
+  {
+    "type": ")",
+    "named": false
+  },
+  {
+    "type": ".",
     "named": false
   },
   {
@@ -116,16 +139,16 @@
     "named": false
   },
   {
-    "type": "event",
-    "named": true
-  },
-  {
-    "type": "identifier",
-    "named": true
-  },
-  {
     "type": "info",
     "named": false
+  },
+  {
+    "type": "log",
+    "named": false
+  },
+  {
+    "type": "module",
+    "named": true
   },
   {
     "type": "number",
@@ -133,6 +156,10 @@
   },
   {
     "type": "string",
+    "named": true
+  },
+  {
+    "type": "symbol",
     "named": true
   },
   {

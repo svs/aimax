@@ -1,11 +1,11 @@
-// tree-sitter-log - Grammar for aimax structured logs
+// tree-sitter-log - Grammar for aimax structured logs (s-expression format)
 //
 // Format:
-//   TIMESTAMP LEVEL MODULE EVENT KEY=VALUE KEY="VALUE" ...
+//   (log LEVEL MODULE EVENT "TIMESTAMP" ((key . "value") ...))
 //
 // Example:
-//   2024-01-13T12:00:00 info llm chat-start messages=1 provider=Anthropic
-//   2024-01-13T12:00:01 error llm chat-error error="connection failed"
+//   (log info llm chat-start "2024-01-13T12:00:00" ((messages . "1")))
+//   (log error llm chat-error "2024-01-13T12:00:01" ((error . "connection failed")))
 
 module.exports = grammar({
   name: 'log',
@@ -14,15 +14,15 @@ module.exports = grammar({
     source_file: $ => repeat($.entry),
 
     entry: $ => seq(
-      $.timestamp,
+      '(',
+      'log',
       $.level,
       $.module,
       $.event,
-      repeat($.field),
-      /\n/
+      $.timestamp,
+      $.fields,
+      ')'
     ),
-
-    timestamp: $ => /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,
 
     level: $ => choice('debug', 'info', 'warn', 'error'),
 
@@ -30,24 +30,30 @@ module.exports = grammar({
 
     event: $ => /[a-z_-]+/,
 
+    timestamp: $ => /"[^"]*"/,
+
+    fields: $ => seq('(', repeat($.field), ')'),
+
     field: $ => seq(
+      '(',
       $.key,
-      '=',
-      $.value
+      '.',
+      $.value,
+      ')'
     ),
 
-    key: $ => /[a-z_]+/,
+    key: $ => /[a-z_-]+/,
 
     value: $ => choice(
       $.string,
       $.number,
-      $.identifier
+      $.symbol
     ),
 
-    string: $ => /"[^"]*"/,
+    string: $ => /"([^"\\]|\\.)*"/,
 
     number: $ => /\d+/,
 
-    identifier: $ => /[A-Za-z_][A-Za-z0-9_.-]*/,
+    symbol: $ => /[a-zA-Z_][a-zA-Z0-9_-]*/,
   }
 });
