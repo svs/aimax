@@ -8,6 +8,7 @@
 //! Buffers, commands, keymaps, hooks, and Steel Scheme interpreter live here.
 
 pub mod buffer;
+pub mod buffers;
 pub mod command;
 pub mod completion;
 pub mod editor;
@@ -23,6 +24,7 @@ pub mod ipc;
 pub mod tools;
 
 pub use buffer::Buffer;
+pub use buffers::BufferStore;
 pub use command::{CommandRegistry, CommandResult, Context};
 pub use completion::{Completer, CompletionSource, FileCompleter, Match};
 pub use editor::{Editor, MinibufferMode};

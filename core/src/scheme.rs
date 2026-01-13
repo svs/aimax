@@ -14,6 +14,8 @@ use streaming_iterator::StreamingIterator;
 
 use std::sync::{Arc, Mutex, RwLock};
 
+use crate::log;
+
 /// Chat message for the Action queue
 #[derive(Debug, Clone)]
 pub struct ChatMessageData {
@@ -109,6 +111,8 @@ pub struct Interpreter {
     engine: Engine,
     pub pending_actions: Arc<Mutex<Vec<Action>>>,
     pub shared_state: Arc<RwLock<SharedState>>,
+    /// Shared buffer store for direct buffer access
+    pub buffer_store: crate::BufferStore,
 }
 
 /// Embedded Scheme code - core UI modules
@@ -239,20 +243,38 @@ const CORE_SCHEME: &str = r#"
 "#;
 
 impl Interpreter {
+    /// Create a new interpreter with a BufferStore for shared buffer access
+    pub fn with_buffer_store(buffer_store: crate::BufferStore) -> Self {
+        let mut engine = Engine::new();
+        let pending_actions = Arc::new(Mutex::new(Vec::new()));
+        let shared_state = Arc::new(RwLock::new(SharedState::default()));
+
+        // Register Rust primitives with buffer store for direct access
+        register_primitives(&mut engine, pending_actions.clone(), shared_state.clone(), buffer_store.clone());
+
+        Self::load_core_files(Interpreter { engine, pending_actions, shared_state, buffer_store })
+    }
+
+    /// Create interpreter without buffer store (for tests)
     pub fn new() -> Self {
+        let buffer_store = crate::BufferStore::new();
         let mut engine = Engine::new();
         let pending_actions = Arc::new(Mutex::new(Vec::new()));
         let shared_state = Arc::new(RwLock::new(SharedState::default()));
 
         // Register Rust primitives
-        register_primitives(&mut engine, pending_actions.clone(), shared_state.clone());
+        register_primitives(&mut engine, pending_actions.clone(), shared_state.clone(), buffer_store.clone());
 
-        Interpreter { engine, pending_actions, shared_state }
+        Interpreter { engine, pending_actions, shared_state, buffer_store }
     }
 
-    /// Create interpreter with core UI modules loaded
+    /// Create interpreter with core UI modules loaded (for tests)
     pub fn with_core() -> Self {
-        let mut interp = Self::new();
+        Self::load_core_files(Self::new())
+    }
+
+    /// Load core Scheme files
+    fn load_core_files(mut interp: Self) -> Self {
 
         // Try to load from scheme/ directory (relative to cwd, or AIMAX_SCHEME_DIR)
         let scheme_dir = std::env::var("AIMAX_SCHEME_DIR")
@@ -482,6 +504,7 @@ fn register_primitives(
     engine: &mut Engine,
     actions: Arc<Mutex<Vec<Action>>>,
     shared_state: Arc<RwLock<SharedState>>,
+    buffer_store: crate::BufferStore,
 ) {
     // ls - list files in a directory
     engine.register_fn("ls", scheme_ls);
@@ -512,63 +535,66 @@ fn register_primitives(
     });
 
     // ===== Buffer Read Primitives =====
-    // These read from shared_state which is synced before Scheme execution
+    // These read directly from BufferStore for immediate access
 
     // (buffer-text) - get entire buffer contents
-    let state = shared_state.clone();
+    let store = buffer_store.clone();
     engine.register_fn("buffer-text", move || -> String {
-        state.read().map(|s| s.buffer_text.clone()).unwrap_or_default()
+        store.with_current(|buf| buf.text()).unwrap_or_default()
     });
 
     // (buffer-line n) - get specific line (0-indexed)
-    let state = shared_state.clone();
+    let store = buffer_store.clone();
     engine.register_fn("buffer-line", move |n: isize| -> String {
-        state.read()
-            .ok()
-            .and_then(|s| s.buffer_lines.get(n as usize).cloned())
-            .unwrap_or_default()
+        store.with_current(|buf| buf.line(n as usize).unwrap_or_default()).unwrap_or_default()
     });
 
-    // (buffer-line-count) - get number of lines (from shared state)
-    let state = shared_state.clone();
+    // (buffer-line-count) - get number of lines
+    let store = buffer_store.clone();
     engine.register_fn("buffer-line-count", move || -> isize {
-        state.read().map(|s| s.buffer_lines.len() as isize).unwrap_or(0)
+        store.with_current(|buf| buf.line_count() as isize).unwrap_or(0)
     });
 
     // (buffer-file-paths) - get all open buffer file paths
-    let state = shared_state.clone();
+    let store = buffer_store.clone();
     engine.register_fn("buffer-file-paths", move || -> Vec<String> {
-        state.read().map(|s| s.buffer_file_paths.clone()).unwrap_or_default()
+        let mut paths = Vec::new();
+        store.for_each(|_, buf| {
+            if let Some(ref path) = buf.file_path {
+                paths.push(path.to_string_lossy().to_string());
+            }
+        });
+        paths
     });
 
     // (buffer-name) - current buffer name
-    let state = shared_state.clone();
+    let store = buffer_store.clone();
     engine.register_fn("buffer-name", move || -> String {
-        state.read().map(|s| s.buffer_name.clone()).unwrap_or_default()
+        store.current_name()
     });
 
     // (buffer-point) - cursor position in current buffer
-    let state = shared_state.clone();
+    let store = buffer_store.clone();
     engine.register_fn("buffer-point", move || -> isize {
-        state.read().map(|s| s.buffer_point as isize).unwrap_or(0)
+        store.with_current(|buf| buf.point() as isize).unwrap_or(0)
     });
 
     // (buffer-names) - all buffer names
-    let state = shared_state.clone();
+    let store = buffer_store.clone();
     engine.register_fn("buffer-names", move || -> Vec<String> {
-        state.read().map(|s| s.buffer_names.clone()).unwrap_or_default()
+        store.names()
     });
 
-    // (process-names) - names of running processes
+    // (process-names) - names of running processes (still from shared_state)
     let state = shared_state.clone();
     engine.register_fn("process-names", move || -> Vec<String> {
         state.read().map(|s| s.process_names.clone()).unwrap_or_default()
     });
 
     // (buffer-modified?) - is current buffer modified?
-    let state = shared_state.clone();
+    let store = buffer_store.clone();
     engine.register_fn("buffer-modified?", move || -> bool {
-        state.read().map(|s| s.buffer_modified).unwrap_or(false)
+        store.with_current(|buf| buf.is_modified()).unwrap_or(false)
     });
 
     // (buffer-modified-p name) - is specific buffer modified?
@@ -638,18 +664,18 @@ fn register_primitives(
         }
     });
 
-    let actions_clone = actions.clone();
-    engine.register_fn("buffer-create", move |name: String| {
-        if let Ok(mut queue) = actions_clone.lock() {
-            queue.push(Action::CreateBuffer(name));
-        }
+    // buffer-create is IMMEDIATE - creates buffer in BufferStore directly
+    // Returns true if buffer was created, false if it already existed
+    let store = buffer_store.clone();
+    engine.register_fn("buffer-create", move |name: String| -> bool {
+        store.create(&name)
     });
 
-    let actions_clone = actions.clone();
-    engine.register_fn("buffer-switch", move |name: String| {
-        if let Ok(mut queue) = actions_clone.lock() {
-            queue.push(Action::SwitchBuffer(name));
-        }
+    // buffer-switch is IMMEDIATE - switches current buffer in BufferStore directly
+    // Returns true if switched, false if buffer doesn't exist
+    let store = buffer_store.clone();
+    engine.register_fn("buffer-switch", move |name: String| -> bool {
+        store.set_current(&name)
     });
 
     let actions_clone = actions.clone();
@@ -1090,6 +1116,14 @@ fn register_primitives(
     // (getenv name) - get environment variable
     engine.register_fn("getenv", |name: String| -> String {
         std::env::var(&name).unwrap_or_default()
+    });
+
+    // (scheme-log level module event data) - write structured log entry
+    // data should be a string representation of alist
+    engine.register_fn("scheme-log", |level: String, module: String, event: String, data: String| {
+        // Parse the data string as key-value pairs
+        // Expected format: "((key . \"value\") ...)" but we'll just log it as-is
+        log::log(&level, &module, &event, &[("scheme-data", &data)]);
     });
 }
 

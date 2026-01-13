@@ -35,11 +35,23 @@
   ;; Tell Rust to activate generic minibuffer mode
   (minibuffer-activate! prompt))
 
-;; Start file completion
+;; Start file completion (with callback for Scheme-driven flow)
 (define (minibuffer-find-file cwd callback)
   (set! *cwd* cwd)
   (set! *completing-file* #t)
   (minibuffer-prompt "Find file: " callback)
+  (minibuffer-update-completions))
+
+;; Start file completion (Rust-driven - no mode change, no callback)
+;; Used by Rust's find_file() which handles submit itself
+(define (minibuffer-start-find-file cwd)
+  (set! *cwd* cwd)
+  (set! *completing-file* #t)
+  (set! *minibuffer-active* #t)
+  (set! *minibuffer-prompt* "Find file: ")
+  (set! *minibuffer-input* "")
+  (set! *minibuffer-point* 0)
+  (set! *minibuffer-selected* 0)
   (minibuffer-update-completions))
 
 ;; Cancel minibuffer
@@ -64,13 +76,25 @@
             (set! *minibuffer-input* selected)
             (set! *minibuffer-point* (string-length *minibuffer-input*)))))))
 
-;; Get the result value (uses selected completion if available)
+;; Get the result value
+;; If user typed nothing AND hasn't moved selection, return empty (use default)
+;; If user typed something OR moved selection, return the selected completion
 (define (minibuffer-get-result)
-  (if (null? *minibuffer-matches*)
-      *minibuffer-input*
-      (let* ((selected (list-ref *minibuffer-matches* *minibuffer-selected*))
-             (dir-part (get-directory-part *minibuffer-input*)))
-        (string-append dir-part selected))))
+  (cond
+    ;; User typed something - return selected completion with dir prefix
+    ((not (string=? *minibuffer-input* ""))
+     (if (null? *minibuffer-matches*)
+         *minibuffer-input*
+         (let* ((selected (list-ref *minibuffer-matches* *minibuffer-selected*))
+                (dir-part (get-directory-part *minibuffer-input*)))
+           (string-append dir-part selected))))
+    ;; User moved selection from default - return selected completion
+    ((> *minibuffer-selected* 0)
+     (if (null? *minibuffer-matches*)
+         ""
+         (list-ref *minibuffer-matches* *minibuffer-selected*)))
+    ;; User typed nothing and didn't move selection - return empty (use default)
+    (else "")))
 
 ;; Submit minibuffer
 (define (minibuffer-submit)

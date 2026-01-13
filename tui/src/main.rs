@@ -55,15 +55,19 @@ struct Tui {
 impl Tui {
     fn new(file_path: Option<&str>) -> Self {
         let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let mut editor = Editor::new(cwd);
+        let editor = Editor::new(cwd);
 
         // Start IPC server
-        aimax_core::ipc::start_server(editor.ipc_tx.clone());
+        aimax_core::ipc::start_server(editor.ipc_tx.clone(), editor.event_bus.clone());
 
         // Load file if provided
         if let Some(path) = file_path {
             match Buffer::from_file(path) {
-                Ok(buf) => editor.buffers[0] = buf,
+                Ok(buf) => {
+                    let name = buf.name.clone();
+                    editor.buffers.insert(buf);
+                    editor.buffers.set_current(&name);
+                }
                 Err(e) => eprintln!("Warning: Could not load {}: {}", path, e),
             }
         }
@@ -79,9 +83,11 @@ impl Tui {
     }
 
     fn buffer_lang(&self) -> Lang {
-        self.editor.buffer_ref().file_path.as_ref()
-            .map(|p| Lang::from_path(p))
-            .unwrap_or(Lang::Plain)
+        self.editor.with_buffer_ref(|buf| {
+            buf.file_path.as_ref()
+                .map(|p| Lang::from_path(p))
+                .unwrap_or(Lang::Plain)
+        })
     }
 }
 
@@ -130,12 +136,16 @@ fn run_headless(file_path: Option<&str>) -> io::Result<()> {
     let mut editor = Editor::new(cwd);
 
     // Start IPC server
-    aimax_core::ipc::start_server(editor.ipc_tx.clone());
+    aimax_core::ipc::start_server(editor.ipc_tx.clone(), editor.event_bus.clone());
 
     // Load file if provided
     if let Some(path) = file_path {
         match Buffer::from_file(path) {
-            Ok(buf) => editor.buffers[0] = buf,
+            Ok(buf) => {
+                let name = buf.name.clone();
+                editor.buffers.insert(buf);
+                editor.buffers.set_current(&name);
+            }
             Err(e) => eprintln!("Warning: Could not load {}: {}", path, e),
         }
     }
@@ -222,11 +232,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, tui: &mut Tui)
             tui.needs_redraw = false;
 
             let lang = tui.buffer_lang();
-            let text = tui.editor.buffer_ref().text();
-            let buffer_name = tui.editor.buffer_ref().name.clone();
-            let cursor_line = tui.editor.buffer_ref().current_line();
-            let cursor_col = tui.editor.buffer_ref().current_column();
-            let modified = tui.editor.buffer_ref().is_modified();
+            let (text, buffer_name, cursor_line, cursor_col, modified) = tui.editor.with_buffer_ref(|buf| {
+                (buf.text(), buf.name.clone(), buf.current_line(), buf.current_column(), buf.is_modified())
+            });
             let status_msg = tui.editor.status_message.clone();
             let chat_streaming = tui.editor.chat_streaming;
 
@@ -390,13 +398,34 @@ fn render_buffer(
         .wrap(Wrap { trim: false });
     f.render_widget(buffer_widget, area);
 
-    // Position cursor (adjusted for scroll) with blink
+    // Position cursor accounting for line wrapping
     if cursor_visible {
-        let cursor_screen_line = cursor_line.saturating_sub(scroll_offset);
-        if cursor_screen_line > 0 && cursor_screen_line <= height {
+        let width = area.width as usize;
+        if width == 0 { return; }
+
+        // Calculate visual row by counting wrapped lines before cursor
+        let mut visual_row: usize = 0;
+        for (line_idx, line_text) in text.lines().enumerate() {
+            let line_num = line_idx + 1; // 1-indexed
+            if line_num < cursor_line {
+                // Lines before cursor: count how many visual rows they take
+                let line_len = line_text.len().max(1);
+                visual_row += (line_len + width - 1) / width; // ceiling division
+            } else if line_num == cursor_line {
+                // Cursor line: add rows for chars before cursor column
+                visual_row += cursor_col / width;
+                break;
+            }
+        }
+
+        // Adjust for scroll and calculate visual column
+        let visual_row = visual_row.saturating_sub(scroll_offset);
+        let visual_col = cursor_col % width;
+
+        if visual_row < height {
             f.set_cursor(
-                area.x + cursor_col as u16,
-                area.y + (cursor_screen_line - 1) as u16
+                area.x + visual_col as u16,
+                area.y + visual_row as u16
             );
         }
     }
@@ -436,9 +465,18 @@ fn render_minibuffer(
             style
         };
 
+        // Calculate scroll offset to keep selected item visible
+        let height = chunks[1].height as usize;
+        let scroll_offset = if selected >= height {
+            selected - height + 1
+        } else {
+            0
+        };
+
         let items: Vec<ListItem> = matches.iter()
             .enumerate()
-            .take(chunks[1].height as usize)
+            .skip(scroll_offset)
+            .take(height)
             .map(|(i, m)| {
                 let style = if i == selected {
                     selected_style
@@ -460,6 +498,7 @@ fn render_minibuffer(
 }
 
 fn handle_minibuffer_key(tui: &mut Tui, key: &KeyEvent) {
+    log(&format!("Minibuffer key: {:?}", key.code));
     match key.code {
         KeyCode::Enter => {
             let _ = tui.editor.minibuffer_submit();
@@ -490,6 +529,8 @@ fn handle_minibuffer_key(tui: &mut Tui, key: &KeyEvent) {
         }
         _ => {}
     }
+    // Ensure redraw after any minibuffer operation
+    tui.needs_redraw = true;
 }
 
 fn handle_buffer_key(tui: &mut Tui, key: &KeyEvent) {
@@ -519,50 +560,60 @@ fn handle_buffer_key(tui: &mut Tui, key: &KeyEvent) {
     match key.code {
         // Movement
         KeyCode::Left | KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            tui.editor.buffer().backward_char();
+            tui.editor.with_buffer(|buf| buf.backward_char());
         }
         KeyCode::Right | KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            tui.editor.buffer().forward_char();
+            tui.editor.with_buffer(|buf| buf.forward_char());
         }
         KeyCode::Up | KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            tui.editor.buffer().previous_line();
+            tui.editor.with_buffer(|buf| buf.previous_line());
         }
         KeyCode::Down | KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            tui.editor.buffer().next_line();
+            tui.editor.with_buffer(|buf| buf.next_line());
         }
         KeyCode::Home | KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            tui.editor.buffer().beginning_of_line();
+            tui.editor.with_buffer(|buf| buf.beginning_of_line());
         }
         KeyCode::End | KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            tui.editor.buffer().end_of_line();
+            tui.editor.with_buffer(|buf| buf.end_of_line());
         }
         // Page Up/Down
         KeyCode::PageUp => {
             let height = 20; // Approximate, could get from terminal size
-            for _ in 0..height {
-                tui.editor.buffer().previous_line();
-            }
+            tui.editor.with_buffer(|buf| {
+                for _ in 0..height {
+                    buf.previous_line();
+                }
+            });
         }
         KeyCode::PageDown => {
             let height = 20;
-            for _ in 0..height {
-                tui.editor.buffer().next_line();
-            }
+            tui.editor.with_buffer(|buf| {
+                for _ in 0..height {
+                    buf.next_line();
+                }
+            });
         }
 
         // Editing
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL)
                         && !key.modifiers.contains(KeyModifiers::ALT) => {
-            tui.editor.buffer().insert_char(c);
+            tui.editor.with_buffer(|buf| buf.insert_char(c));
         }
         KeyCode::Enter => {
-            tui.editor.buffer().insert_char('\n');
+            // In chat buffer, Enter sends the message
+            let is_chat = tui.editor.with_buffer_ref(|buf| buf.name == "*chat*");
+            if is_chat {
+                execute_command(tui, "chat-send-from-buffer");
+            } else {
+                tui.editor.with_buffer(|buf| buf.insert_char('\n'));
+            }
         }
         KeyCode::Backspace => {
-            tui.editor.buffer().delete_backward();
+            tui.editor.with_buffer(|buf| buf.delete_backward());
         }
         KeyCode::Delete | KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            tui.editor.buffer().delete_forward();
+            tui.editor.with_buffer(|buf| buf.delete_forward());
         }
 
         // Keyboard quit
@@ -614,4 +665,7 @@ fn execute_command(tui: &mut Tui, cmd: &str) {
         CommandResult::Quit => tui.should_quit = true,
         _ => {}
     }
+
+    // Always redraw after executing a command
+    tui.needs_redraw = true;
 }

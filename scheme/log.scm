@@ -6,6 +6,33 @@
 ;; Path to log file
 (define *log-path* "/tmp/aimax.log")
 
+;; === Writing Logs ===
+
+;; Format a single field as string
+(define (format-log-field f)
+  (string-append "(" (symbol->string (car f)) " . \""
+                 (if (string? (cdr f)) (cdr f) (symbol->string (cdr f)))
+                 "\")"))
+
+;; Format fields as string for Rust logging
+(define (format-log-fields fields)
+  (if (null? fields)
+      "()"
+      (string-append "(" (string-join (map format-log-field fields) " ") ")")))
+
+;; Convenience functions for different log levels (calls into Rust)
+(define (log-debug module event fields)
+  (scheme-log "debug" module event (format-log-fields fields)))
+
+(define (log-info module event fields)
+  (scheme-log "info" module event (format-log-fields fields)))
+
+(define (log-warn module event fields)
+  (scheme-log "warn" module event (format-log-fields fields)))
+
+(define (log-error module event fields)
+  (scheme-log "error" module event (format-log-fields fields)))
+
 ;; === Reading Logs ===
 
 ;; Read all log entries from file

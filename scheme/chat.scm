@@ -62,16 +62,34 @@
 (define (chat-clear)
   (set! *chat-messages* '()))
 
-;; Called by Rust when assistant response completes
-;; This adds the response to history for multi-turn
-(define (chat-on-response-complete response)
+;; === Stream callbacks (called by Rust) ===
+;; Scheme handles all buffer manipulation - editor just sends events
+
+;; Called on each text chunk from LLM
+(define (chat-on-text text)
+  (buffer-insert text))
+
+;; Called when LLM response completes
+(define (chat-on-done response)
   (chat-add-message "assistant" response)
-  (message (string-append "Chat history: " (number->string (length *chat-messages*)) " messages")))
+  (buffer-insert "\n\n>>> ")
+  (message (string-append "Chat: " (number->string (length *chat-messages*)) " messages")))
+
+;; Called on error
+(define (chat-on-error err)
+  (buffer-insert (string-append "\n[Error: " err "]\n>>> "))
+  (message (string-append "Chat error: " err)))
+
+;; Legacy callback name (deprecated)
+(define (chat-on-response-complete response)
+  (chat-on-done response))
 
 ;; Send a message in a multi-turn conversation
 ;; Adds user message to history and sends full history to LLM
 (define (chat-send prompt)
   (chat-add-message "user" prompt)
+  ;; Add newlines to separate from response (formatting is Scheme's job)
+  (buffer-insert "\n\n")
   (message (string-append "Sending " (number->string (length *chat-messages*)) " messages..."))
   (ai-chat-messages *ai-provider* *ai-api-key* *ai-model*
                     *ai-system* *chat-messages*))
@@ -139,13 +157,16 @@
 ;; Send from buffer - grab text after last >>> and send
 ;; Bound to C-c C-c in chat buffers
 (define (chat-send-from-buffer)
-  (message "chat-send-from-buffer called")
   (let* ((text (buffer-text))
+         (len (string-length text))
          (prompt-pos (string-last-index-of text ">>> ")))
-    (message (string-append "prompt-pos: " (if prompt-pos (number->string prompt-pos) "false")))
     (if prompt-pos
-        (let ((input (substring text (+ prompt-pos 4))))
-          (message (string-append "input: [" (string-trim input) "]"))
+        (let* ((start (+ prompt-pos 4))
+               ;; Defensive bounds check
+               (end (min len (string-length text)))
+               (input (if (and (< start end) (<= end (string-length text)))
+                          (substring text start end)
+                          "")))
           (if (> (string-length (string-trim input)) 0)
               (chat-send (string-trim input))
               (message "No input after >>>")))
@@ -182,12 +203,16 @@
 ;; id: unique identifier for this tool call
 ;; name: the tool name (e.g., "read_file")
 ;; input: JSON string of arguments
-(define (chat-on-tool-use id name input)
-  ;; Add to pending queue
+;; text: accumulated assistant text before tool use
+(define (chat-on-tool-use id name input text)
+  ;; Add assistant message with tool_use to history (for API compliance)
+  (chat-add-assistant-with-tool text id name input)
+  ;; Display tool use in buffer
+  (buffer-insert (string-append "\n[Tool: " name " → " input "]\n"))
+  ;; Add to pending queue and execute
   (set! *pending-tool-calls*
         (append *pending-tool-calls*
                 (list (list id name input))))
-  ;; Try to execute (will check permissions)
   (process-next-tool))
 
 ;; Process the next pending tool call

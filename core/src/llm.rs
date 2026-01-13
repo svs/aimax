@@ -368,6 +368,7 @@ mod tests {
             role: "tool_result".to_string(),
             content: r#"{"content": "file contents"}"#.to_string(),
             tool_use_id: Some("call_123".to_string()),
+            tool_calls: vec![],
         };
 
         assert_eq!(msg.role, "tool_result");
