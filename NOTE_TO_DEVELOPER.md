@@ -38,24 +38,22 @@ We are building "Process Buffers" (Comint).
 - **Logic:** Scheme defines faces (`set-face-attribute`).
 - **Render:** TUI uses a cached index (`Vec<FaceAttributes>`) derived from Tree-Sitter scopes.
 
-## 6. Agent-Driven Headless Mode (IPC Critique)
+## 6. Agent-Driven Headless Mode (IPC Architecture)
 
-The current IPC is a "Remote Eval" port, not a "Control Port." For agents to drive the editor effectively, we must move beyond fire-and-forget strings.
+We will use a **"Thin Transport, Thick Scheme"** architecture.
 
-- **The Problem:** 
-    - **Observability:** Agents cannot see events (process exit, buffer changes, logs) without polling.
-    - **Structure:** `eval_remote` returns unstructured strings. Agents need machine-readable JSON.
-    - **Atomicity:** Getting the full editor state currently requires multiple round-trips.
-- **The Solution (JSON-RPC + Events):**
-    - **Protocol:** Move to JSON-RPC over the existing Unix Socket.
-    - **State Snapshot:** Implement a `get_editor_state` method that returns a JSON blob of all buffers, cursors, and processes.
-    - **Subscription Mode:** Allow IPC clients to "subscribe" to a stream of events (e.g., `{"event": "buffer_changed", "data": {...}}`).
+- **Transport:** JSON-RPC 2.0 over Unix Socket (Newline Delimited).
+- **Core Method:** `eval` is the primary API.
+    - Request: `{"jsonrpc": "2.0", "method": "eval", "params": {"code": "(...)"}, "id": 1}`
+    - Response: `{"jsonrpc": "2.0", "result": <JSON-serialized-Scheme-Value>, "id": 1}`
+- **Why:** This avoids maintaining two APIs (Rust + Scheme). Agents can script complex atomic actions (e.g., `(begin (next-line) (delete-word))`) in a single round-trip.
+- **State Access:** We will implement a Scheme function (e.g., `(aimax-state-dump)`) that constructs a hash-map of the editor state. The IPC layer simply serializes this map to JSON.
+- **Observability:** `(ipc-subscribe "buffer-modified")` in Scheme will trigger JSON events on the socket.
 
 ## Developer Checklist
-- [ ] **JSON-RPC IPC:** Implement structured requests/responses over the Unix socket.
-- [ ] **Event Bus:** Broadcast buffer changes and process output to IPC subscribers.
-- [ ] **State Dump:** Create a `get-state-json` primitive for atomic environment snapshots.
-- [ ] Fix IPC Framing (Length-prefix).
+- [ ] **JSON-RPC Layer:** Wrap the Scheme Interpreter in a JSON-RPC handler (replacing the raw string protocol).
+- [ ] **Scheme->JSON Serializer:** Ensure Steel values (Lists, Maps, Strings) convert to standard JSON types.
+- [ ] **Event Bus:** Allow Scheme to push JSON events to the socket.
 - [ ] Implement `portable-pty` integration.
 - [ ] Refactor `SharedState` to use `Rope` instead of `String` to reduce allocation.
 - [ ] Implement Window Splits (Visual only).
