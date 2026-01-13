@@ -38,7 +38,23 @@ We are building "Process Buffers" (Comint).
 - **Logic:** Scheme defines faces (`set-face-attribute`).
 - **Render:** TUI uses a cached index (`Vec<FaceAttributes>`) derived from Tree-Sitter scopes.
 
+## 6. Agent-Driven Headless Mode (IPC Critique)
+
+The current IPC is a "Remote Eval" port, not a "Control Port." For agents to drive the editor effectively, we must move beyond fire-and-forget strings.
+
+- **The Problem:** 
+    - **Observability:** Agents cannot see events (process exit, buffer changes, logs) without polling.
+    - **Structure:** `eval_remote` returns unstructured strings. Agents need machine-readable JSON.
+    - **Atomicity:** Getting the full editor state currently requires multiple round-trips.
+- **The Solution (JSON-RPC + Events):**
+    - **Protocol:** Move to JSON-RPC over the existing Unix Socket.
+    - **State Snapshot:** Implement a `get_editor_state` method that returns a JSON blob of all buffers, cursors, and processes.
+    - **Subscription Mode:** Allow IPC clients to "subscribe" to a stream of events (e.g., `{"event": "buffer_changed", "data": {...}}`).
+
 ## Developer Checklist
+- [ ] **JSON-RPC IPC:** Implement structured requests/responses over the Unix socket.
+- [ ] **Event Bus:** Broadcast buffer changes and process output to IPC subscribers.
+- [ ] **State Dump:** Create a `get-state-json` primitive for atomic environment snapshots.
 - [ ] Fix IPC Framing (Length-prefix).
 - [ ] Implement `portable-pty` integration.
 - [ ] Refactor `SharedState` to use `Rope` instead of `String` to reduce allocation.

@@ -1,0 +1,140 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/grammar.schema.json",
+  "name": "log",
+  "rules": {
+    "source_file": {
+      "type": "REPEAT",
+      "content": {
+        "type": "SYMBOL",
+        "name": "entry"
+      }
+    },
+    "entry": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "timestamp"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "level"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "module"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "event"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SYMBOL",
+            "name": "field"
+          }
+        },
+        {
+          "type": "PATTERN",
+          "value": "\\n"
+        }
+      ]
+    },
+    "timestamp": {
+      "type": "PATTERN",
+      "value": "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"
+    },
+    "level": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "debug"
+        },
+        {
+          "type": "STRING",
+          "value": "info"
+        },
+        {
+          "type": "STRING",
+          "value": "warn"
+        },
+        {
+          "type": "STRING",
+          "value": "error"
+        }
+      ]
+    },
+    "module": {
+      "type": "PATTERN",
+      "value": "[a-z_]+"
+    },
+    "event": {
+      "type": "PATTERN",
+      "value": "[a-z_-]+"
+    },
+    "field": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "key"
+        },
+        {
+          "type": "STRING",
+          "value": "="
+        },
+        {
+          "type": "SYMBOL",
+          "name": "value"
+        }
+      ]
+    },
+    "key": {
+      "type": "PATTERN",
+      "value": "[a-z_]+"
+    },
+    "value": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "string"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "number"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "identifier"
+        }
+      ]
+    },
+    "string": {
+      "type": "PATTERN",
+      "value": "\"[^\"]*\""
+    },
+    "number": {
+      "type": "PATTERN",
+      "value": "\\d+"
+    },
+    "identifier": {
+      "type": "PATTERN",
+      "value": "[A-Za-z_][A-Za-z0-9_.-]*"
+    }
+  },
+  "extras": [
+    {
+      "type": "PATTERN",
+      "value": "\\s"
+    }
+  ],
+  "conflicts": [],
+  "precedences": [],
+  "externals": [],
+  "inline": [],
+  "supertypes": [],
+  "reserved": {}
+}

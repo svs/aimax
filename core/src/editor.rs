@@ -3,11 +3,12 @@
 //! This module provides a headless editor that can be tested without a terminal.
 //! The TUI is just a rendering layer on top of this.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::mpsc::{self, Receiver, Sender};
-use crate::{Buffer, Interpreter, command::CommandResult, scheme::Action};
+use crate::{Buffer, Interpreter, command::CommandResult, scheme::{Action, ChatMessageData}};
 use crate::process::{ProcessRegistry, ProcessMessage, MAX_PROCESS_BUFFER_LINES};
 use crate::llm::{ChatConfig, Message, StreamEvent, chat_stream};
 
@@ -30,8 +31,8 @@ pub struct Editor {
     pub cwd: PathBuf,
 
     // IPC command queue
-    pub ipc_tx: Sender<String>,
-    pub ipc_rx: Receiver<String>,
+    pub ipc_tx: Sender<crate::ipc::IpcRequest>,
+    pub ipc_rx: Receiver<crate::ipc::IpcRequest>,
 
     // Minibuffer state (mirrors Scheme state for rendering)
     pub minibuffer_active: bool,
@@ -67,6 +68,10 @@ pub struct Editor {
 
     // Keybinding requests for TUI to apply
     pub pending_keybindings: Vec<(String, String)>,  // (key, command)
+
+    // Line buffers for process output filtering
+    // Accumulates partial lines until newline, then calls filter
+    process_line_buffers: HashMap<String, String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -81,6 +86,12 @@ pub enum MinibufferMode {
 
 impl Editor {
     pub fn new(cwd: PathBuf) -> Self {
+        // Initialize logging
+        crate::log::init();
+        crate::log::log("info", "editor", "startup", &[
+            ("cwd", &cwd.to_string_lossy()),
+        ]);
+
         let scheme = Interpreter::with_core();
         let (ipc_tx, ipc_rx) = mpsc::channel();
         let (process_tx, process_rx) = mpsc::channel();
@@ -115,10 +126,15 @@ impl Editor {
             // Tool registry with built-in tools
             tool_registry: crate::tools::ToolRegistry::new(),
             pending_keybindings: Vec::new(),
+            process_line_buffers: HashMap::new(),
         };
 
         // Load user init file
         editor.load_user_init();
+
+        crate::log::log("info", "editor", "ready", &[
+            ("buffers", &editor.buffers.len().to_string()),
+        ]);
 
         editor
     }
@@ -129,15 +145,24 @@ impl Editor {
         let init_path = PathBuf::from(&home).join(".aimax").join("init.scm");
 
         if init_path.exists() {
+            crate::log::log("info", "scheme", "loading-init", &[
+                ("path", &init_path.to_string_lossy()),
+            ]);
             match std::fs::read_to_string(&init_path) {
                 Ok(code) => {
                     if let Err(e) = self.run_scheme("init", &code) {
-                        log_error("init.scm", &e);
+                        crate::log::log("error", "scheme", "init-error", &[
+                            ("error", &e),
+                        ]);
                         self.status_message = Some(format!("Error in init.scm: {}", e));
+                    } else {
+                        crate::log::log("info", "scheme", "init-loaded", &[]);
                     }
                 }
                 Err(e) => {
-                    log_error("init.scm", &format!("Failed to read: {}", e));
+                    crate::log::log("error", "scheme", "init-read-error", &[
+                        ("error", &e.to_string()),
+                    ]);
                 }
             }
         }
@@ -160,51 +185,33 @@ impl Editor {
 
     /// Sync buffer state to Scheme globals (lightweight)
     fn sync_buffer_state(&mut self) {
+        // Update tree-sitter tree before syncing
+        let lang = crate::syntax::Lang::from_path(
+            self.buffer_ref().file_path.as_deref().unwrap_or(std::path::Path::new(&self.buffer_ref().name))
+        );
+        if let Some(ts_lang) = lang.tree_sitter_language() {
+            self.buffer().update_tree(ts_lang);
+        }
+
+        // Sync buffer file paths (needed for desktop-save)
         if let Ok(mut state) = self.scheme.shared_state.write() {
-            // Sync buffer file paths (needed for desktop-save)
             state.buffer_file_paths = self.buffers.iter()
                 .filter_map(|b| b.file_path.as_ref())
                 .map(|p| p.to_string_lossy().to_string())
                 .collect();
-            // Sync all buffer names
-            state.buffer_names = self.buffers.iter()
-                .map(|b| b.name.clone())
-                .collect();
-            // Sync modified status and locals for each buffer
-            state.buffer_modified_map.clear();
-            state.buffer_locals_map.clear();
-            for buf in &self.buffers {
-                state.buffer_modified_map.insert(buf.name.clone(), buf.is_modified());
-                // Stringify locals for this buffer
-                let mut locals = std::collections::HashMap::new();
-                for (k, v) in &buf.locals {
-                    let val = match v {
-                        crate::buffer::LocalVar::String(s) => s.clone(),
-                        crate::buffer::LocalVar::Int(n) => n.to_string(),
-                        crate::buffer::LocalVar::Bool(b) => b.to_string(),
-                    };
-                    locals.insert(k.clone(), val);
-                }
-                state.buffer_locals_map.insert(buf.name.clone(), locals);
-            }
+            state.buffer_names = self.buffers.iter().map(|b| b.name.clone()).collect();
+            state.buffer_name = self.buffer_ref().name.clone();
+            state.buffer_text = self.buffer_ref().text();
+            state.buffer_lines = self.buffer_ref().lines().collect();
+            state.buffer_major_mode = self.buffer_ref().major_mode.clone();
+            state.buffer_modified = self.buffer_ref().is_modified();
+            state.buffer_tree = self.buffer_ref().tree.clone().map(std::sync::Arc::new);
+            
             // Sync running process names
             state.process_names = self.processes.list();
-            // Sync current buffer info
-            let buf = &self.buffers[self.current];
-            state.buffer_name = buf.name.clone();
-            state.buffer_major_mode = buf.major_mode.clone();
-            state.buffer_modified = buf.is_modified();
-            // Sync buffer locals (stringify values)
-            state.buffer_locals.clear();
-            for (k, v) in &buf.locals {
-                let val = match v {
-                    crate::buffer::LocalVar::String(s) => s.clone(),
-                    crate::buffer::LocalVar::Int(n) => n.to_string(),
-                    crate::buffer::LocalVar::Bool(b) => b.to_string(),
-                };
-                state.buffer_locals.insert(k.clone(), val);
-            }
         }
+        // Note: We skip syncing Scheme globals here for performance.
+        // Scheme code should use primitives like (buffer-point) instead of *buffer-point*.
     }
 
     /// Run Scheme code, logging any errors
@@ -416,12 +423,22 @@ impl Editor {
                     // Queue for TUI to apply to keymap
                     self.pending_keybindings.push((key, command));
                 }
+                Action::SetBufferLocal { buffer, key, value } => {
+                    // Set buffer-local variable
+                    let buf_idx = match buffer {
+                        Some(name) => self.buffers.iter().position(|b| b.name == name),
+                        None => Some(self.current),
+                    };
+                    if let Some(idx) = buf_idx {
+                        self.buffers[idx].set_local(&key, crate::buffer::LocalVar::String(value));
+                    }
+                }
             }
         }
     }
 
     /// Start a chat with an LLM provider
-    fn start_chat(&mut self, provider: &str, api_key: &str, model: &str, system: Option<&str>, messages: Vec<(String, String)>) {
+    fn start_chat(&mut self, provider: &str, api_key: &str, model: &str, system: Option<&str>, messages: Vec<ChatMessageData>) {
         if api_key.is_empty() {
             self.status_message = Some("No API key set. Set *ai-api-key* in init.scm".to_string());
             return;
@@ -436,27 +453,41 @@ impl Editor {
                 self.buffers.len() - 1
             });
 
-        // Append user message to buffer
-        if let Some((_, content)) = messages.last() {
-            self.buffers[chat_buf_idx].append(&format!("\n>>> {}\n\n", content));
+        // Append user message to buffer (only for user messages, not tool results)
+        if let Some(msg) = messages.last() {
+            if msg.role == "user" {
+                self.buffers[chat_buf_idx].append(&format!("\n>>> {}\n\n", msg.content));
+            }
         }
 
         // Switch to chat buffer
         self.current = chat_buf_idx;
 
-        // Build config
+        // Build config with tools from registry
+        let tools: Vec<_> = self.tool_registry.all_tools()
+            .into_iter()
+            .cloned()
+            .collect();
+
         let config = ChatConfig {
             provider: crate::llm::Provider::from_str(provider),
             api_key: api_key.to_string(),
             model: model.to_string(),
             system: system.map(|s| s.to_string()),
             max_tokens: 4096,
-            tools: Vec::new(),  // TODO: Get tools from Scheme
+            tools,
         };
 
         // Build messages for API
         let api_messages: Vec<Message> = messages.into_iter()
-            .map(|(role, content)| Message { role, content, tool_use_id: None })
+            .map(|m| Message {
+                role: m.role,
+                content: m.content,
+                tool_use_id: m.tool_use_id,
+                tool_calls: m.tool_calls.into_iter()
+                    .map(|(id, name, input)| crate::llm::ToolCallInfo { id, name, input })
+                    .collect(),
+            })
             .collect();
 
         // Start streaming
@@ -707,6 +738,10 @@ impl Editor {
         // Open the file
         match Buffer::from_file(path.to_string_lossy().as_ref()) {
             Ok(buf) => {
+                crate::log::log("info", "editor", "file-opened", &[
+                    ("path", &path.to_string_lossy()),
+                    ("lines", &buf.line_count().to_string()),
+                ]);
                 if let Some(parent) = path.parent() {
                     self.cwd = parent.to_path_buf();
                 }
@@ -752,29 +787,71 @@ impl Editor {
 
     /// Process IPC commands and Scheme requests
     pub fn process_ipc(&mut self) -> bool {
+        use crate::ipc::IpcRequest;
+
         let mut processed = false;
-        while let Ok(code) = self.ipc_rx.try_recv() {
+        while let Ok(request) = self.ipc_rx.try_recv() {
             processed = true;
 
-            // If it's a simple command string, execute it
-            if !code.starts_with('(') {
-                let _ = self.execute_command(&code);
-                continue;
-            }
+            match request {
+                IpcRequest::Fire(code) => {
+                    // Log truncated preview
+                    let preview = if code.len() > 60 {
+                        format!("{}...", &code[..60])
+                    } else {
+                        code.clone()
+                    };
+                    crate::log::log("info", "ipc", "fire", &[("code", &preview)]);
 
-            // Otherwise run as scheme
-            if let Err(e) = self.run_scheme("ipc", &code) {
-                log_error("ipc", &format!("Scheme error: {}", e));
-            }
+                    // Execute without response
+                    if !code.starts_with('(') {
+                        let _ = self.execute_command(&code);
+                    } else if let Err(e) = self.run_scheme("ipc", &code) {
+                        log_error("ipc", &format!("Scheme error: {}", e));
+                    }
+                    self.process_actions();
+                }
+                IpcRequest::Sync { code, reply } => {
+                    // Log truncated preview
+                    let preview = if code.len() > 60 {
+                        format!("{}...", &code[..60])
+                    } else {
+                        code.clone()
+                    };
+                    crate::log::log("info", "ipc", "sync", &[("code", &preview)]);
 
-            // Process any actions queued by Scheme
-            self.process_actions();
+                    // Execute and return result
+                    let result = if !code.starts_with('(') {
+                        use crate::command::CommandResult;
+                        match self.execute_command(&code) {
+                            CommandResult::Ok => "ok".to_string(),
+                            CommandResult::Message(m) => m,
+                            CommandResult::Error(e) => format!("error: {}", e),
+                            CommandResult::Quit => "quit".to_string(),
+                            CommandResult::NotImplemented(c) => format!("not-implemented: {}", c),
+                        }
+                    } else {
+                        // Use run_scheme which syncs buffer state first
+                        match self.run_scheme("ipc-sync", &code) {
+                            Ok(val) => format!("{}", val),
+                            Err(e) => format!("error: {}", e),
+                        }
+                    };
+
+                    let _ = reply.send(result);
+                    // process_actions already called by run_scheme
+                }
+            }
         }
         processed
     }
 
     /// Process messages from running processes (PTY output)
     /// Returns true if any messages were processed
+    ///
+    /// If buffer has a "process-filter" local variable (Scheme function name),
+    /// each complete line is passed through that filter before display.
+    /// Filter returns: transformed line, or empty string to skip.
     pub fn process_messages(&mut self) -> bool {
         let mut processed = false;
 
@@ -791,18 +868,88 @@ impl Editor {
                             self.buffers.len() - 1
                         });
 
-                    // Append output to buffer
-                    let buf = &mut self.buffers[buf_idx];
-                    buf.append(&text);
+                    // Check for process-filter local variable
+                    let filter_fn = self.buffers[buf_idx].locals
+                        .get("process-filter")
+                        .and_then(|v| match v {
+                            crate::buffer::LocalVar::String(s) => Some(s.clone()),
+                            _ => None,
+                        });
 
-                    // Ring buffer: trim if too many lines
-                    let line_count = buf.line_count();
-                    if line_count > MAX_PROCESS_BUFFER_LINES {
-                        let lines_to_remove = line_count - MAX_PROCESS_BUFFER_LINES;
-                        buf.delete_lines(0, lines_to_remove);
+                    if let Some(filter_name) = filter_fn {
+                        // Line-based filtering mode
+                        // Accumulate in line buffer
+                        let line_buf = self.process_line_buffers
+                            .entry(name.clone())
+                            .or_insert_with(String::new);
+                        line_buf.push_str(&text);
+
+                        // Process complete lines
+                        let mut output = String::new();
+                        while let Some(newline_pos) = line_buf.find('\n') {
+                            let line = line_buf[..newline_pos].to_string();
+                            *line_buf = line_buf[newline_pos + 1..].to_string();
+
+                            // Call Scheme filter function
+                            let expr = format!("({} \"{}\")",
+                                filter_name,
+                                line.replace("\\", "\\\\").replace("\"", "\\\""));
+
+                            match self.scheme.run(&expr) {
+                                Ok(result) => {
+                                    let filtered: String = result.to_string();
+                                    // Remove quotes from string result
+                                    let filtered = filtered.trim_matches('"');
+                                    if !filtered.is_empty() {
+                                        output.push_str(filtered);
+                                        output.push('\n');
+                                    }
+                                }
+                                Err(e) => {
+                                    log_error("process-filter", &format!("{}: {}", filter_name, e));
+                                    // On error, pass through unfiltered
+                                    output.push_str(&line);
+                                    output.push('\n');
+                                }
+                            }
+                        }
+
+                        // Append filtered output to buffer
+                        if !output.is_empty() {
+                            let buf = &mut self.buffers[buf_idx];
+                            buf.append(&output);
+
+                            // Ring buffer: trim if too many lines
+                            let line_count = buf.line_count();
+                            if line_count > MAX_PROCESS_BUFFER_LINES {
+                                let lines_to_remove = line_count - MAX_PROCESS_BUFFER_LINES;
+                                buf.delete_lines(0, lines_to_remove);
+                            }
+                        }
+                    } else {
+                        // No filter - direct append
+                        let buf = &mut self.buffers[buf_idx];
+                        buf.append(&text);
+
+                        // Ring buffer: trim if too many lines
+                        let line_count = buf.line_count();
+                        if line_count > MAX_PROCESS_BUFFER_LINES {
+                            let lines_to_remove = line_count - MAX_PROCESS_BUFFER_LINES;
+                            buf.delete_lines(0, lines_to_remove);
+                        }
                     }
                 }
                 ProcessMessage::Exited { name, exit_code } => {
+                    // Flush any remaining line buffer content
+                    if let Some(remaining) = self.process_line_buffers.remove(&name) {
+                        if !remaining.is_empty() {
+                            if let Some(buf_idx) = self.buffers.iter().position(|b| b.name == name) {
+                                self.buffers[buf_idx].append(&remaining);
+                                self.buffers[buf_idx].append("\n");
+                            }
+                        }
+                    }
+
                     // Find process buffer and append exit message
                     if let Some(buf_idx) = self.buffers.iter().position(|b| b.name == name) {
                         let msg = match exit_code {
@@ -864,11 +1011,21 @@ impl Editor {
                     let _ = self.run_scheme("chat_complete", &format!(r#"(chat-on-response-complete "{}")"#, escaped));
                 }
                 StreamEvent::ToolUse { id, name, input } => {
-                    // Call Scheme callback for tool use
-                    // Scheme will handle permission checking and execution
+                    // First, add assistant's text WITH tool_use to history BEFORE the tool result
+                    // The assistant message must include the tool_use block for API compliance
+                    let response = std::mem::take(&mut self.chat_response_buffer);
+                    let escaped = response.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
                     let escaped_id = id.replace("\\", "\\\\").replace("\"", "\\\"");
                     let escaped_name = name.replace("\\", "\\\\").replace("\"", "\\\"");
                     let escaped_input = input.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+
+                    // Add assistant message with tool_use info
+                    let _ = self.run_scheme("chat_pre_tool", &format!(
+                        r#"(chat-add-assistant-with-tool "{}" "{}" "{}" "{}")"#,
+                        escaped, escaped_id, escaped_name, escaped_input
+                    ));
+
+                    // Call Scheme callback for tool execution
                     let _ = self.run_scheme("tool_use", &format!(
                         r#"(chat-on-tool-use "{}" "{}" "{}")"#,
                         escaped_id, escaped_name, escaped_input
@@ -945,6 +1102,7 @@ impl Editor {
     /// Execute a command by name
     pub fn execute_command(&mut self, cmd: &str) -> CommandResult {
         // Fast path for simple commands (no Scheme overhead)
+        // Don't log movement commands - too noisy
         match cmd {
             "forward-char" => { self.buffer().forward_char(); return CommandResult::Ok; }
             "backward-char" => { self.buffer().backward_char(); return CommandResult::Ok; }
@@ -962,6 +1120,12 @@ impl Editor {
             "newline" => { self.buffer().insert_char('\n'); return CommandResult::Ok; }
             _ => {}
         }
+
+        // Log non-movement commands
+        crate::log::log("debug", "editor", "command", &[
+            ("name", cmd),
+            ("buffer", &self.buffer().name),
+        ]);
 
         // Commands that need Scheme (hooks, complex logic)
         let scheme_cmd = format!("({})", cmd);

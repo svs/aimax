@@ -9,11 +9,21 @@ use steel::steel_vm::engine::Engine;
 use steel::steel_vm::register_fn::RegisterFn;
 use steel::rvals::SteelVal;
 use std::path::PathBuf;
+use tree_sitter::{Query, QueryCursor};
+use streaming_iterator::StreamingIterator;
 
 use std::sync::{Arc, Mutex, RwLock};
 
-/// Action requested by Scheme to be performed on the Editor
+/// Chat message for the Action queue
 #[derive(Debug, Clone)]
+pub struct ChatMessageData {
+    pub role: String,
+    pub content: String,
+    pub tool_use_id: Option<String>,
+    pub tool_calls: Vec<(String, String, String)>,  // (id, name, input)
+}
+
+/// Action requested by Scheme to be performed on the Editor
 pub enum Action {
     Insert(String),
     Delete,
@@ -59,7 +69,7 @@ pub enum Action {
         api_key: String,
         model: String,
         system: Option<String>,
-        messages: Vec<(String, String)>,  // (role, content)
+        messages: Vec<ChatMessageData>,
     },
     // Tool execution (from agentic chat)
     ExecuteTool {
@@ -71,6 +81,8 @@ pub enum Action {
     MinibufferActivate { prompt: String },
     // Keybindings
     GlobalSetKey { key: String, command: String },
+    // Buffer local variables
+    SetBufferLocal { buffer: Option<String>, key: String, value: String },
 }
 
 /// Shared state for Scheme to query buffer contents
@@ -88,6 +100,7 @@ pub struct SharedState {
     pub buffer_major_mode: String,         // Current buffer's major mode
     pub buffer_name: String,               // Current buffer name
     pub buffer_locals: std::collections::HashMap<String, String>,  // Buffer local vars (stringified)
+    pub buffer_tree: Option<std::sync::Arc<tree_sitter::Tree>>, // Current buffer's syntax tree
 }
 
 /// The Scheme interpreter
@@ -263,59 +276,65 @@ impl Interpreter {
             });
 
         if let Some(dir) = scheme_dir {
-            // Load completion.scm first (minibuffer depends on it)
-            let completion_path = dir.join("completion.scm");
-            if completion_path.exists() {
-                if let Ok(code) = std::fs::read_to_string(&completion_path) {
-                    if let Err(e) = interp.run(&code) {
-                        eprintln!("Warning: Failed to load {}: {}", completion_path.display(), e);
+            // Initialize logging early
+            crate::log::init();
+            crate::log::log("info", "scheme", "loading-core", &[
+                ("dir", &dir.to_string_lossy()),
+            ]);
+
+            // Helper to load a scheme file with logging
+            fn load_scheme_file(interp: &mut Interpreter, path: std::path::PathBuf) {
+                if path.exists() {
+                    if let Ok(code) = std::fs::read_to_string(&path) {
+                        let filename = path.file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        if let Err(e) = interp.run(&code) {
+                            crate::log::log("error", "scheme", "load-error", &[
+                                ("file", &filename),
+                                ("error", &e),
+                            ]);
+                        } else {
+                            crate::log::log("debug", "scheme", "loaded", &[
+                                ("file", &filename),
+                            ]);
+                        }
                     }
                 }
             }
+
+            // Load completion.scm first (minibuffer depends on it)
+            load_scheme_file(&mut interp, dir.join("completion.scm"));
 
             // Load minibuffer.scm
-            let minibuffer_path = dir.join("minibuffer.scm");
-            if minibuffer_path.exists() {
-                if let Ok(code) = std::fs::read_to_string(&minibuffer_path) {
-                    if let Err(e) = interp.run(&code) {
-                        eprintln!("Warning: Failed to load {}: {}", minibuffer_path.display(), e);
-                    }
-                }
-            }
+            load_scheme_file(&mut interp, dir.join("minibuffer.scm"));
 
             // Load commands.scm - command definitions
-            let commands_path = dir.join("commands.scm");
-            if commands_path.exists() {
-                if let Ok(code) = std::fs::read_to_string(&commands_path) {
-                    if let Err(e) = interp.run(&code) {
-                        eprintln!("Warning: Failed to load {}: {}", commands_path.display(), e);
-                    }
-                }
-            }
+            load_scheme_file(&mut interp, dir.join("commands.scm"));
 
             // Load desktop.scm - save/restore buffers
-            let desktop_path = dir.join("desktop.scm");
-            if desktop_path.exists() {
-                if let Ok(code) = std::fs::read_to_string(&desktop_path) {
-                    if let Err(e) = interp.run(&code) {
-                        eprintln!("Warning: Failed to load {}: {}", desktop_path.display(), e);
-                    }
-                }
-            }
+            load_scheme_file(&mut interp, dir.join("desktop.scm"));
 
             // Load chat.scm - AI chat configuration
-            let chat_path = dir.join("chat.scm");
-            if chat_path.exists() {
-                if let Ok(code) = std::fs::read_to_string(&chat_path) {
-                    if let Err(e) = interp.run(&code) {
-                        eprintln!("Warning: Failed to load {}: {}", chat_path.display(), e);
-                    }
-                }
-            }
+            load_scheme_file(&mut interp, dir.join("chat.scm"));
+
+            // Load log.scm - Structured log viewing
+            load_scheme_file(&mut interp, dir.join("log.scm"));
+
+            crate::log::log("info", "scheme", "core-loaded", &[
+                ("files", "completion,minibuffer,commands,desktop,chat,log"),
+            ]);
         } else {
             // Fall back to embedded code
+            crate::log::init();
+            crate::log::log("warn", "scheme", "fallback-mode", &[
+                ("reason", "scheme directory not found"),
+            ]);
             if let Err(e) = interp.run(CORE_SCHEME) {
-                eprintln!("Warning: Failed to load core Scheme modules: {}", e);
+                crate::log::log("error", "scheme", "load-error", &[
+                    ("file", "embedded-core"),
+                    ("error", &format!("{}", e)),
+                ]);
             }
         }
 
@@ -435,9 +454,18 @@ impl Interpreter {
 
     /// Load a file
     pub fn load_file(&mut self, path: &str) -> Result<(), String> {
+        crate::log::log("debug", "scheme", "load-file-start", &[("path", path)]);
         let code = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read {}: {}", path, e))?;
+            .map_err(|e| {
+                let err = format!("Failed to read {}: {}", path, e);
+                crate::log::log("error", "scheme", "load-file-error", &[
+                    ("path", path),
+                    ("error", &err),
+                ]);
+                err
+            })?;
         self.run(&code)?;
+        crate::log::log("debug", "scheme", "load-file-done", &[("path", path)]);
         Ok(())
     }
 }
@@ -567,6 +595,24 @@ fn register_primitives(
             .ok()
             .and_then(|s| s.buffer_locals_map.get(&buffer_name)?.get(&key).cloned())
             .unwrap_or_default()
+    });
+
+    // (set-buffer-local! key value) - set local in current buffer
+    // (set-buffer-local! buffer-name key value) - set local in named buffer
+    // Example: (set-buffer-local! "process-filter" "my-filter-fn")
+    // Example: (set-buffer-local! "*log*" "process-filter" "log-filter")
+    let actions_clone = actions.clone();
+    engine.register_fn("set-buffer-local!", move |key: String, value: String| {
+        if let Ok(mut queue) = actions_clone.lock() {
+            queue.push(Action::SetBufferLocal { buffer: None, key, value });
+        }
+    });
+
+    let actions_clone = actions.clone();
+    engine.register_fn("set-buffer-local-named!", move |buffer: String, key: String, value: String| {
+        if let Ok(mut queue) = actions_clone.lock() {
+            queue.push(Action::SetBufferLocal { buffer: Some(buffer), key, value });
+        }
     });
 
     // ===== Buffer Write Primitives =====
@@ -872,26 +918,78 @@ fn register_primitives(
                 api_key,
                 model,
                 system: system_opt,
-                messages: vec![("user".to_string(), prompt)],
+                messages: vec![ChatMessageData {
+                    role: "user".to_string(),
+                    content: prompt,
+                    tool_use_id: None,
+                    tool_calls: vec![],
+                }],
             });
         }
     });
 
     // (ai-chat-messages provider api-key model system-prompt messages)
     // For multi-turn conversations
+    // Messages are lists of (role content tool_use_id ((tool_id tool_name tool_input) ...))
     let actions_clone = actions.clone();
-    engine.register_fn("ai-chat-messages", move |provider: String, api_key: String, model: String, system: String, messages: Vec<Vec<String>>| {
+    engine.register_fn("ai-chat-messages", move |provider: String, api_key: String, model: String, system: String, messages: steel::rvals::SteelVal| {
+        use steel::rvals::SteelVal;
         if let Ok(mut queue) = actions_clone.lock() {
             let system_opt = if system.is_empty() { None } else { Some(system) };
-            let msgs: Vec<(String, String)> = messages.into_iter()
-                .filter_map(|pair| {
-                    if pair.len() >= 2 {
-                        Some((pair[0].clone(), pair[1].clone()))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+
+            // Parse messages from SteelVal
+            let msgs: Vec<ChatMessageData> = if let SteelVal::ListV(list) = messages {
+                list.iter().filter_map(|msg| {
+                    if let SteelVal::ListV(parts) = msg {
+                        let parts: Vec<_> = parts.iter().collect();
+                        if parts.len() >= 2 {
+                            let role = match &parts[0] {
+                                SteelVal::StringV(s) => s.to_string(),
+                                _ => return None,
+                            };
+                            let content = match &parts[1] {
+                                SteelVal::StringV(s) => s.to_string(),
+                                _ => return None,
+                            };
+                            let tool_use_id = if parts.len() >= 3 {
+                                match &parts[2] {
+                                    SteelVal::StringV(s) if !s.is_empty() => Some(s.to_string()),
+                                    _ => None,
+                                }
+                            } else { None };
+
+                            // Parse tool_calls from 4th element if present
+                            let tool_calls = if parts.len() >= 4 {
+                                if let SteelVal::ListV(tools) = &parts[3] {
+                                    tools.iter().filter_map(|tc| {
+                                        if let SteelVal::ListV(tool_parts) = tc {
+                                            let tp: Vec<_> = tool_parts.iter().collect();
+                                            if tp.len() >= 3 {
+                                                let id = match &tp[0] {
+                                                    SteelVal::StringV(s) => s.to_string(),
+                                                    _ => return None,
+                                                };
+                                                let name = match &tp[1] {
+                                                    SteelVal::StringV(s) => s.to_string(),
+                                                    _ => return None,
+                                                };
+                                                let input = match &tp[2] {
+                                                    SteelVal::StringV(s) => s.to_string(),
+                                                    _ => return None,
+                                                };
+                                                Some((id, name, input))
+                                            } else { None }
+                                        } else { None }
+                                    }).collect()
+                                } else { vec![] }
+                            } else { vec![] };
+
+                            Some(ChatMessageData { role, content, tool_use_id, tool_calls })
+                        } else { None }
+                    } else { None }
+                }).collect()
+            } else { vec![] };
+
             queue.push(Action::Chat {
                 provider,
                 api_key,
@@ -900,6 +998,62 @@ fn register_primitives(
                 messages: msgs,
             });
         }
+    });
+
+    // (ts-query query-text) - Run Tree-sitter query on current buffer
+    // Returns list of matches, where each match is a list of (capture-name . text)
+    let state = shared_state.clone();
+    engine.register_fn("ts-query", move |query_text: String| -> Vec<Vec<(String, String)>> {
+        let guard = match state.read() {
+            Ok(g) => g,
+            Err(_) => return vec![],
+        };
+        
+        let tree = match guard.buffer_tree.as_ref() {
+            Some(t) => t,
+            None => return vec![],
+        };
+        
+        let text = &guard.buffer_text;
+        
+        // Map major mode to TS language
+        let lang = crate::syntax::Lang::from_extension(&guard.buffer_major_mode);
+        let ts_lang = match lang.tree_sitter_language() {
+            Some(l) => l,
+            None => {
+                // Fallback to detection from name
+                match crate::syntax::Lang::from_path(std::path::Path::new(&guard.buffer_name)).tree_sitter_language() {
+                    Some(l) => l,
+                    None => return vec![],
+                }
+            }
+        };
+        
+        let query = match Query::new(&ts_lang, &query_text) {
+            Ok(q) => q,
+            Err(e) => {
+                eprintln!("TS Query Error: {}", e);
+                return vec![];
+            }
+        };
+        
+        let mut cursor = QueryCursor::new();
+        let text_bytes = text.as_bytes();
+
+        let mut results = Vec::new();
+        let mut matches = cursor.matches(&query, tree.root_node(), text_bytes);
+        while let Some(m) = matches.next() {
+            let mut captures = Vec::new();
+            for c in m.captures {
+                let name = query.capture_names()[c.index as usize].to_string();
+                let node_text = text.get(c.node.byte_range())
+                    .unwrap_or("")
+                    .to_string();
+                captures.push((name, node_text));
+            }
+            results.push(captures);
+        }
+        results
     });
 
     // (execute-rust-tool id name input) - execute a tool from the registry

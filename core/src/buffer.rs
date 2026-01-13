@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
 use std::path::{Path, PathBuf};
+use tree_sitter::{Parser, Tree};
 
 /// Buffer local variable value
 #[derive(Debug, Clone)]
@@ -18,7 +19,6 @@ pub enum LocalVar {
 }
 
 /// A buffer: named container of text with a cursor position
-#[derive(Debug, Clone)]
 pub struct Buffer {
     /// Buffer name (e.g., "*scratch*", "main.rs")
     pub name: String,
@@ -34,6 +34,38 @@ pub struct Buffer {
     pub major_mode: String,
     /// Buffer-local variables
     pub locals: HashMap<String, LocalVar>,
+    /// Tree-sitter tree for structural understanding
+    pub tree: Option<Tree>,
+    /// Parser used to generate the tree
+    parser: Option<Parser>,
+}
+
+impl std::fmt::Debug for Buffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Buffer")
+            .field("name", &self.name)
+            .field("file_path", &self.file_path)
+            .field("point", &self.point)
+            .field("modified", &self.modified)
+            .field("major_mode", &self.major_mode)
+            .finish()
+    }
+}
+
+impl Clone for Buffer {
+    fn clone(&self) -> Self {
+        Buffer {
+            name: self.name.clone(),
+            file_path: self.file_path.clone(),
+            rope: self.rope.clone(),
+            point: self.point,
+            modified: self.modified,
+            major_mode: self.major_mode.clone(),
+            locals: self.locals.clone(),
+            tree: self.tree.clone(),
+            parser: None, // Don't clone the parser, create new if needed
+        }
+    }
 }
 
 impl Buffer {
@@ -47,6 +79,8 @@ impl Buffer {
             modified: false,
             major_mode: "fundamental".to_string(),
             locals: HashMap::new(),
+            tree: None,
+            parser: None,
         }
     }
 
@@ -60,6 +94,8 @@ impl Buffer {
             modified: false,
             major_mode: "fundamental".to_string(),
             locals: HashMap::new(),
+            tree: None,
+            parser: None,
         }
     }
 
@@ -104,6 +140,8 @@ impl Buffer {
             modified: false,
             major_mode: "fundamental".to_string(),
             locals: HashMap::new(),
+            tree: None,
+            parser: None,
         })
     }
 
@@ -409,6 +447,30 @@ impl Buffer {
             let line_start = self.rope.line_to_char(row);
             let line_len = self.rope.line(row).len_chars();
             self.point = line_start + col.min(line_len);
+        }
+    }
+
+    /// Update the syntax tree using Tree-sitter
+    pub fn update_tree(&mut self, language: tree_sitter::Language) {
+        if self.parser.is_none() {
+            let mut parser = Parser::new();
+            if let Err(e) = parser.set_language(&language) {
+                eprintln!("Failed to set language: {}", e);
+                return;
+            }
+            self.parser = Some(parser);
+        }
+
+        if let Some(ref mut parser) = self.parser {
+            // Efficiently parse from Ropey chunks
+            self.tree = parser.parse_with(&mut |byte_offset, _| {
+                if byte_offset >= self.rope.len_bytes() {
+                    return &[][..];
+                }
+                let (chunk, chunk_byte_idx, _, _) = self.rope.chunk_at_byte(byte_offset);
+                let offset_in_chunk = byte_offset - chunk_byte_idx;
+                &chunk.as_bytes()[offset_in_chunk..]
+            }, self.tree.as_ref());
         }
     }
 

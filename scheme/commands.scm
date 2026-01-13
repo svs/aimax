@@ -32,6 +32,9 @@
   "end-of-buffer"
   "view-log"
   "refresh-log"
+  "log-stream"
+  "log-stream-errors"
+  "log-stream-stop"
 ))
 
 ;; === Commands ===

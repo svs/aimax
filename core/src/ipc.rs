@@ -2,13 +2,17 @@
 //!
 //! Listens on a Unix Domain Socket and pushes commands to the Editor's queue.
 //! Socket is placed in ~/.aimax/ with restricted permissions for security.
+//!
+//! Protocol:
+//! - Fire-and-forget: `(expr)` - execute, no response
+//! - Sync request: `?(expr)` - execute and return result
 
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Sender};
 use std::thread;
 
 /// Get the socket path (~/.aimax/sock)
@@ -17,7 +21,18 @@ pub fn socket_path() -> PathBuf {
     PathBuf::from(home).join(".aimax").join("sock")
 }
 
-pub fn start_server(tx: Sender<String>) {
+/// IPC request types
+pub enum IpcRequest {
+    /// Fire-and-forget command (no response expected)
+    Fire(String),
+    /// Sync command with reply channel
+    Sync {
+        code: String,
+        reply: Sender<String>,
+    },
+}
+
+pub fn start_server(tx: Sender<IpcRequest>) {
     let sock_path = socket_path();
     let aimax_dir = sock_path.parent().unwrap();
 
@@ -69,8 +84,13 @@ pub fn start_server(tx: Sender<String>) {
     });
 }
 
-fn handle_client(stream: UnixStream, tx: Sender<String>) {
-    let mut reader = BufReader::new(stream);
+fn handle_client(mut stream: UnixStream, tx: Sender<IpcRequest>) {
+    // Clone for reading, keep original for writing
+    let reader_stream = match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let mut reader = BufReader::new(reader_stream);
     let mut buffer = String::new();
 
     loop {
@@ -80,20 +100,48 @@ fn handle_client(stream: UnixStream, tx: Sender<String>) {
             Ok(_) => {
                 buffer.push_str(&line);
 
-                // Check if we have a complete S-expression (balanced parens)
-                // or a simple command (no parens)
                 let trimmed = buffer.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
 
-                if !trimmed.starts_with('(') {
-                    // Simple command, send it
-                    let _ = tx.send(trimmed.to_string());
-                    buffer.clear();
-                } else if is_balanced(trimmed) {
-                    // Complete S-expression
-                    let _ = tx.send(trimmed.to_string());
+                // Check for sync request (starts with ?)
+                let is_sync = trimmed.starts_with('?');
+                let code = if is_sync {
+                    &trimmed[1..] // Strip the ?
+                } else {
+                    trimmed
+                };
+
+                // Check if we have a complete S-expression or simple command
+                let is_complete = if !code.starts_with('(') {
+                    true // Simple command
+                } else {
+                    is_balanced(code)
+                };
+
+                if is_complete {
+                    if is_sync {
+                        // Create reply channel and wait for response
+                        let (reply_tx, reply_rx) = mpsc::channel();
+                        let _ = tx.send(IpcRequest::Sync {
+                            code: code.to_string(),
+                            reply: reply_tx,
+                        });
+
+                        // Wait for response and write back (with timeout)
+                        match reply_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                            Ok(result) => {
+                                let _ = writeln!(stream, "{}", result);
+                            }
+                            Err(_) => {
+                                let _ = writeln!(stream, "error: timeout waiting for response");
+                            }
+                        }
+                    } else {
+                        // Fire and forget
+                        let _ = tx.send(IpcRequest::Fire(code.to_string()));
+                    }
                     buffer.clear();
                 }
                 // Otherwise keep accumulating
@@ -101,6 +149,26 @@ fn handle_client(stream: UnixStream, tx: Sender<String>) {
             Err(_) => break,
         }
     }
+}
+
+/// Client: connect to running aimax and evaluate expression synchronously
+pub fn eval_remote(expr: &str) -> Result<String, String> {
+    let sock_path = socket_path();
+
+    let mut stream = UnixStream::connect(&sock_path)
+        .map_err(|e| format!("Cannot connect to {}: {}", sock_path.display(), e))?;
+
+    // Send sync request (with ? prefix)
+    writeln!(stream, "?{}", expr)
+        .map_err(|e| format!("Failed to send: {}", e))?;
+
+    // Read response
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    reader.read_line(&mut response)
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+
+    Ok(response.trim().to_string())
 }
 
 /// Check if parentheses are balanced in a string

@@ -14,6 +14,7 @@ pub mod editor;
 pub mod face;
 pub mod keymap;
 pub mod llm;
+pub mod log;
 pub mod minibuffer;
 pub mod process;
 pub mod scheme;

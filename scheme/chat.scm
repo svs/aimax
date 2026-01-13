@@ -1,4 +1,4 @@
-;;; chat.scm - AI Chat with Multi-Turn Support
+;;; chat.scm - AI Chat with Multi-Turn Support and Agentic Loop
 ;;;
 ;;; User configures these in ~/.aimax/init.scm:
 ;;;   (set! *ai-provider* "anthropic")  ; or "openai", "ollama", "gemini", etc.
@@ -29,14 +29,34 @@
 (define *ai-system* "You are a helpful assistant.")
 
 ;; Conversation history for multi-turn chat
-;; Each message is a list: (role content) where role is "user" or "assistant"
+;; Each message is a list: (role content) or (role content tool_use_id)
+;; - User messages: ("user" "message content")
+;; - Assistant messages: ("assistant" "response content")
+;; - Tool results: ("tool_result" "result content" "tool_call_id" ())
+;; Message format: (role content tool_use_id tool_calls)
+;; - tool_calls is a list of (id name input) for assistant messages with tool_use
 (define *chat-messages* '())
 
 ;; Add a message to conversation history
+;; For regular messages (user/assistant), just (role content)
 (define (chat-add-message role content)
   (set! *chat-messages*
         (append *chat-messages*
-                (list (list role content)))))
+                (list (list role content "" '())))))
+
+;; Add an assistant message that includes a tool_use
+;; This is needed for correct API message format
+(define (chat-add-assistant-with-tool content tool-id tool-name tool-input)
+  (set! *chat-messages*
+        (append *chat-messages*
+                (list (list "assistant" content ""
+                            (list (list tool-id tool-name tool-input)))))))
+
+;; Add a tool result with its ID
+(define (chat-add-tool-message id content)
+  (set! *chat-messages*
+        (append *chat-messages*
+                (list (list "tool_result" content id '())))))
 
 ;; Clear conversation history (start fresh)
 (define (chat-clear)
@@ -179,12 +199,23 @@
 (define (clear-pending-tools)
   (set! *pending-tool-calls* '()))
 
-;; Add a tool result to the conversation
+;; Add a tool result to the conversation and continue the agentic loop
 ;; This is called after a tool executes (from Rust)
 (define (chat-add-tool-result id status content)
-  (chat-add-message "tool_result" content)
-  ;; Note: In the future, this will trigger continuation of the chat
-  (message (string-append "Tool result: " (if (string=? status "success") "OK" "ERROR"))))
+  ;; Add tool result to conversation with its ID
+  (chat-add-tool-message id content)
+  (message (string-append "Tool result: " (if (string=? status "success") "OK" "ERROR")))
+
+  ;; Continue the agentic loop - send conversation back to LLM
+  ;; The LLM will see the tool result and can respond with text or more tool calls
+  (chat-continue-after-tool))
+
+;; Continue chat after tool result
+;; Sends the full conversation (including tool result) back to the LLM
+(define (chat-continue-after-tool)
+  (message "Continuing chat after tool result...")
+  (ai-chat-messages *ai-provider* *ai-api-key* *ai-model*
+                    *ai-system* *chat-messages*))
 
 ;; === Keybindings ===
 ;; C-c C-c to send chat from buffer (like gptel)

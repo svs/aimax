@@ -87,8 +87,77 @@ impl Tui {
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
-    let file_path = args.get(1).map(|s| s.as_str());
 
+    // Check for -e flag (eval mode - connect to running instance)
+    if let Some(pos) = args.iter().position(|a| a == "-e") {
+        if let Some(expr) = args.get(pos + 1) {
+            match aimax_core::ipc::eval_remote(expr) {
+                Ok(result) => {
+                    println!("{}", result);
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            eprintln!("Usage: aimax -e \"(expression)\"");
+            std::process::exit(1);
+        }
+    }
+
+    // Check for --headless flag
+    let headless = args.iter().any(|a| a == "--headless");
+    let file_path = args.iter()
+        .find(|a| !a.starts_with('-') && *a != &args[0])
+        .map(|s| s.as_str());
+
+    if headless {
+        run_headless(file_path)
+    } else {
+        run_tui(file_path)
+    }
+}
+
+/// Run in headless mode - no TUI, just IPC + processes + logging
+/// Logs go to both /tmp/aimax.log and stdout
+fn run_headless(file_path: Option<&str>) -> io::Result<()> {
+    // Echo logs to stdout in headless mode
+    aimax_core::log::set_echo_stdout(true);
+
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut editor = Editor::new(cwd);
+
+    // Start IPC server
+    aimax_core::ipc::start_server(editor.ipc_tx.clone());
+
+    // Load file if provided
+    if let Some(path) = file_path {
+        match Buffer::from_file(path) {
+            Ok(buf) => editor.buffers[0] = buf,
+            Err(e) => eprintln!("Warning: Could not load {}: {}", path, e),
+        }
+    }
+
+    // Main loop - handle IPC, processes, chat
+    loop {
+        editor.process_ipc();
+        editor.process_messages();
+        editor.process_chat();
+
+        if editor.should_quit {
+            break;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    Ok(())
+}
+
+/// Run with full TUI
+fn run_tui(file_path: Option<&str>) -> io::Result<()> {
     let mut tui = Tui::new(file_path);
 
     // Setup terminal

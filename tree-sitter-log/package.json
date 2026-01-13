@@ -1,0 +1,17 @@
+{
+  "name": "tree-sitter-log",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for aimax structured logs",
+  "main": "bindings/node",
+  "keywords": ["tree-sitter", "parser", "log"],
+  "tree-sitter": [
+    {
+      "scope": "source.log",
+      "file-types": ["log"],
+      "highlights": "queries/highlights.scm"
+    }
+  ],
+  "devDependencies": {
+    "tree-sitter-cli": "^0.24.0"
+  }
+}

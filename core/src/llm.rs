@@ -4,22 +4,7 @@
 //! Scheme defines: provider, model, system prompt, context, handlers.
 
 use futures::StreamExt;
-use std::io::Write;
-
-/// Log to /tmp/aimax.log as s-expressions
-fn log(tag: &str, data: &[(&str, &str)]) {
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/aimax.log")
-    {
-        // Output as s-expression: (tag (key . "value") (key . "value") ...)
-        let pairs: Vec<String> = data.iter()
-            .map(|(k, v)| format!("({} . \"{}\")", k, v.replace("\"", "\\\"")))
-            .collect();
-        let _ = writeln!(f, "({} {})", tag, pairs.join(" "));
-    }
-}
+use crate::log::log;
 use llm::{
     builder::{FunctionBuilder, LLMBackend, LLMBuilder, ParamBuilder},
     chat::{ChatMessage, StreamChunk},
@@ -33,6 +18,15 @@ pub struct Message {
     pub role: String,      // "user", "assistant", "tool_result"
     pub content: String,
     pub tool_use_id: Option<String>,  // For tool_result messages
+    pub tool_calls: Vec<ToolCallInfo>,  // For assistant messages with tool_use
+}
+
+/// Info about a tool call made by the assistant
+#[derive(Debug, Clone)]
+pub struct ToolCallInfo {
+    pub id: String,
+    pub name: String,
+    pub input: String,  // JSON string
 }
 
 /// Tool definition for the LLM
@@ -141,13 +135,13 @@ pub fn chat_stream(
     messages: Vec<Message>,
     tx: Sender<StreamEvent>,
 ) {
-    log("chat-start", &[
+    log("info", "llm", "chat-start", &[
         ("messages", &messages.len().to_string()),
         ("provider", &format!("{:?}", config.provider)),
         ("model", &config.model),
     ]);
     for (i, m) in messages.iter().enumerate() {
-        log("chat-message", &[
+        log("debug", "llm", "chat-message", &[
             ("index", &i.to_string()),
             ("role", &m.role),
             ("len", &m.content.len().to_string()),
@@ -158,7 +152,7 @@ pub fn chat_stream(
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             if let Err(e) = stream_chat(&config, &messages, &tx).await {
-                log("chat-error", &[("error", &e.to_string())]);
+                log("error", "llm", "chat-error", &[("error", &e.to_string())]);
                 let _ = tx.send(StreamEvent::Error(e.to_string()));
             }
         });
@@ -212,7 +206,24 @@ async fn stream_chat(
     let chat_messages: Vec<ChatMessage> = messages.iter()
         .map(|m| {
             match m.role.as_str() {
-                "assistant" => ChatMessage::assistant().content(&m.content).build(),
+                "assistant" => {
+                    let mut builder = ChatMessage::assistant().content(&m.content);
+                    // If assistant made tool calls, include them
+                    if !m.tool_calls.is_empty() {
+                        let tool_calls: Vec<ToolCall> = m.tool_calls.iter()
+                            .map(|tc| ToolCall {
+                                id: tc.id.clone(),
+                                call_type: "function".to_string(),
+                                function: FunctionCall {
+                                    name: tc.name.clone(),
+                                    arguments: tc.input.clone(),
+                                },
+                            })
+                            .collect();
+                        builder = builder.tool_use(tool_calls);
+                    }
+                    builder.build()
+                }
                 "tool_result" => {
                     // Tool results are sent back with the tool_use_id
                     let id = m.tool_use_id.as_deref().unwrap_or("").to_string();

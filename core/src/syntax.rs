@@ -44,6 +44,10 @@ pub enum Lang {
     Rust,
     JavaScript,
     Json,
+    Markdown,
+    Html,
+    Bash,
+    Scheme,
     Plain,
 }
 
@@ -55,6 +59,10 @@ impl Lang {
             "js" | "mjs" | "cjs" | "jsx" => Lang::JavaScript,
             "ts" | "tsx" => Lang::JavaScript,
             "json" => Lang::Json,
+            "md" | "markdown" => Lang::Markdown,
+            "html" | "htm" => Lang::Html,
+            "sh" | "bash" | "zsh" => Lang::Bash,
+            "scm" | "ss" | "rkt" => Lang::Scheme,
             _ => Lang::Plain,
         }
     }
@@ -65,6 +73,20 @@ impl Lang {
             .and_then(|e| e.to_str())
             .map(Self::from_extension)
             .unwrap_or(Lang::Plain)
+    }
+
+    /// Get Tree-sitter language for this Lang
+    pub fn tree_sitter_language(&self) -> Option<tree_sitter::Language> {
+        match self {
+            Lang::Rust => Some(tree_sitter_rust::LANGUAGE.into()),
+            Lang::JavaScript => Some(tree_sitter_javascript::LANGUAGE.into()),
+            Lang::Json => Some(tree_sitter_json::LANGUAGE.into()),
+            Lang::Markdown => Some(tree_sitter_md::LANGUAGE.into()),
+            Lang::Html => Some(tree_sitter_html::LANGUAGE.into()),
+            Lang::Bash => Some(tree_sitter_bash::LANGUAGE.into()),
+            Lang::Scheme => Some(tree_sitter_scheme::LANGUAGE.into()),
+            Lang::Plain => None,
+        }
     }
 }
 
@@ -147,7 +169,7 @@ impl SyntaxHighlighter {
     }
 
     fn init_languages(&mut self) {
-        // Rust - uses queries from the grammar crate
+        // Rust
         match HighlightConfiguration::new(
             tree_sitter_rust::LANGUAGE.into(),
             "rust",
@@ -164,7 +186,7 @@ impl SyntaxHighlighter {
             }
         }
 
-        // JavaScript - uses queries from the grammar crate
+        // JavaScript
         match HighlightConfiguration::new(
             tree_sitter_javascript::LANGUAGE.into(),
             "javascript",
@@ -181,7 +203,7 @@ impl SyntaxHighlighter {
             }
         }
 
-        // JSON - uses queries from the grammar crate
+        // JSON
         match HighlightConfiguration::new(
             tree_sitter_json::LANGUAGE.into(),
             "json",
@@ -195,6 +217,74 @@ impl SyntaxHighlighter {
             }
             Err(e) => {
                 eprintln!("Failed to create JSON highlight config: {:?}", e);
+            }
+        }
+
+        // Markdown
+        match HighlightConfiguration::new(
+            tree_sitter_md::LANGUAGE.into(),
+            "markdown",
+            "", // TODO: Add Markdown queries
+            "",
+            "",
+        ) {
+            Ok(mut config) => {
+                config.configure(HIGHLIGHT_NAMES);
+                self.configs.insert(Lang::Markdown, config);
+            }
+            Err(e) => {
+                eprintln!("Failed to create Markdown highlight config: {:?}", e);
+            }
+        }
+
+        // HTML
+        match HighlightConfiguration::new(
+            tree_sitter_html::LANGUAGE.into(),
+            "html",
+            tree_sitter_html::HIGHLIGHTS_QUERY,
+            tree_sitter_html::INJECTIONS_QUERY,
+            "",
+        ) {
+            Ok(mut config) => {
+                config.configure(HIGHLIGHT_NAMES);
+                self.configs.insert(Lang::Html, config);
+            }
+            Err(e) => {
+                eprintln!("Failed to create HTML highlight config: {:?}", e);
+            }
+        }
+
+        // Bash
+        match HighlightConfiguration::new(
+            tree_sitter_bash::LANGUAGE.into(),
+            "bash",
+            tree_sitter_bash::HIGHLIGHT_QUERY,
+            "",
+            "",
+        ) {
+            Ok(mut config) => {
+                config.configure(HIGHLIGHT_NAMES);
+                self.configs.insert(Lang::Bash, config);
+            }
+            Err(e) => {
+                eprintln!("Failed to create Bash highlight config: {:?}", e);
+            }
+        }
+
+        // Scheme (for .scm files, logs, and Steel scripting)
+        match HighlightConfiguration::new(
+            tree_sitter_scheme::LANGUAGE.into(),
+            "scheme",
+            tree_sitter_scheme::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        ) {
+            Ok(mut config) => {
+                config.configure(HIGHLIGHT_NAMES);
+                self.configs.insert(Lang::Scheme, config);
+            }
+            Err(e) => {
+                eprintln!("Failed to create Scheme highlight config: {:?}", e);
             }
         }
     }
